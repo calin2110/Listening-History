@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-const state = {frame: "all", from: "", to: "", q: "", sort: "total", min: 20, size: 48, page: 1};
+const state = {frame: "all", from: "", to: "", q: "", sort: "total", min: 20, decay: 0, size: 48, page: 1};
 let META = null, items = [], ctrl = null;
 
 // ---------------------------------------------------------------- helpers --
@@ -32,6 +32,12 @@ function splitBar(sp, td) {
   return `<i class="sp" style="width:${sp / t * 100}%"></i><i class="td" style="width:${td / t * 100}%"></i>`;
 }
 const enc = encodeURIComponent;
+
+// slider stops: [half-life in days, label]; 0 = no decay
+const DECAY = [[0, "Off"], [7, "1 week"], [14, "2 weeks"], [30, "1 month"], [91, "3 months"],
+               [182, "6 months"], [365, "1 year"], [730, "2 years"], [1826, "5 years"]];
+const decayOn = () => state.decay > 0;
+function pts(v) { return v.toLocaleString(undefined, {maximumFractionDigits: v < 100 ? 1 : 0}); }
 
 // ------------------------------------------------------------ time frames --
 function rangeFor(frame) {
@@ -82,6 +88,7 @@ async function load() {
   const mine = ctrl = new AbortController();
   $("grid").setAttribute("aria-busy", "true");
   const p = new URLSearchParams({from: state.from, to: state.to, q: state.q, sort: state.sort, min: state.min,
+                                 half: DECAY[state.decay][0],
                                  page: state.page, size: state.size});
   try {
     const r = await fetch("/api/tracks?" + p, {signal: mine.signal});
@@ -104,16 +111,20 @@ function render(d) {
   $("totals").innerHTML = t.tracks
     ? `<span><b>${hours(t.spotify + t.tidal)}</b> across <b>${t.tracks.toLocaleString()}</b> tracks and ${t.plays.toLocaleString()} plays</span>` +
       `<span class="legend" style="--c:var(--spotify)">Spotify ${hours(t.spotify)}</span>` +
-      `<span class="legend" style="--c:var(--tidal)">Tidal ${hours(t.tidal)}</span>`
+      `<span class="legend" style="--c:var(--tidal)">Tidal ${hours(t.tidal)}</span>` +
+      (decayOn() ? `<span>Score <b>${pts(t.score)}</b></span>` : "")
     : "";
+  $("decay-note").textContent = decayOn()
+    ? `A minute played ${DECAY[state.decay][1]} before ${niceDay(d.ref)} counts half as much, ` +
+      `${DECAY[state.decay][1]} before that a quarter, and so on. Score = weighted minutes.`
+    : "Every minute counts the same. Slide to make recent listening count more.";
   $("bigsplit").innerHTML = splitBar(t.spotify, t.tidal);
-
-  items = d.items;
-  const start = (d.page - 1) * d.size;
-    $("count").textContent = (d.matched === t.tracks
+  $("count").textContent = (d.matched === t.tracks
     ? `${t.tracks.toLocaleString()} tracks` : `${d.matched.toLocaleString()} of ${t.tracks.toLocaleString()}`) +
     (t.hidden ? `, ${t.hidden.toLocaleString()} shorter hidden` : "");
 
+  items = d.items;
+  const start = (d.page - 1) * d.size;
   if (!t.tracks && t.hidden) {
     $("grid").innerHTML = `<li class="empty">No track reached ${esc($("min").selectedOptions[0].text.toLowerCase())} in this time frame (${t.hidden.toLocaleString()} shorter ones are hidden). Lower the minimum or pick a wider frame.</li>`;
   } else if (!t.tracks) {
@@ -131,7 +142,9 @@ function render(d) {
       <div class="meta">
         <div class="title" title="${esc(r.title)}">${esc(r.title)}</div>
         <div class="artist" title="${esc(r.artist)}">${esc(r.artist)}</div>
-        <div class="time"><b>${fmt(r.total)}</b><span>${r.plays.toLocaleString()} plays</span></div>
+        <div class="time">${decayOn()
+          ? `<b>${pts(r.score)} pts</b><span>${fmt(r.total)}</span>`
+          : `<b>${fmt(r.total)}</b><span>${r.plays.toLocaleString()} plays</span>`}</div>
         <div class="split" title="Spotify ${fmt(r.spotify)} / Tidal ${fmt(r.tidal)}">${splitBar(r.spotify, r.tidal)}</div>
       </div></li>`).join("");
   }
@@ -153,7 +166,7 @@ function renderPager(page, pages) {
 
 // ------------------------------------------------------------- URL state --
 function writeHash() {
-  const h = {f: state.frame, q: state.q, s: state.sort, m: state.min, n: state.size, p: state.page};
+  const h = {f: state.frame, q: state.q, s: state.sort, m: state.min, d: state.decay, n: state.size, p: state.page};
   if (state.frame === "custom") Object.assign(h, {from: state.from, to: state.to});
   history.replaceState(null, "", "#" + new URLSearchParams(h));
 }
@@ -166,9 +179,11 @@ function readHash() {
   state.q = h.get("q") || "";
   if (h.get("s")) state.sort = h.get("s");
   if (h.has("m") && !isNaN(+h.get("m"))) state.min = +h.get("m");
+  if (DECAY[+h.get("d")]) state.decay = +h.get("d");
   if (+h.get("n")) state.size = +h.get("n");
   if (+h.get("p")) state.page = +h.get("p");
-  $("q").value = state.q; $("sort").value = state.sort; $("min").value = String(state.min); $("size").value = String(state.size);
+  $("q").value = state.q; $("sort").value = state.sort; $("min").value = String(state.min);
+  $("decay").value = String(state.decay); $("decay-val").textContent = DECAY[state.decay][1]; $("size").value = String(state.size);
 }
 
 // ----------------------------------------------------------------- lyrics --
@@ -184,6 +199,7 @@ async function openLyrics(r) {
   $("dlg-title").textContent = r.title;
   $("dlg-sub").textContent = r.artist + (r.album ? " — " + r.album : "");
   $("dlg-foot").innerHTML =
+    (decayOn() ? `<span>Score ${pts(r.score)}</span>` : "") +
     `<span>Spotify ${fmt(r.spotify)}</span><span>Tidal ${fmt(r.tidal)}</span>` +
     (r.first ? `<span>${r.first === r.last ? "Played " + niceDay(r.first) : niceDay(r.first) + " to " + niceDay(r.last)}</span>` : "") +
     (r.spotify_url ? `<a href="${esc(r.spotify_url)}" target="_blank" rel="noopener">Open in Spotify</a>` : "") +
@@ -225,6 +241,18 @@ $("q").addEventListener("input", e => {
 });
 $("sort").addEventListener("change", e => { state.sort = e.target.value; state.page = 1; load(); });
 $("min").addEventListener("change", e => { state.min = +e.target.value; state.page = 1; load(); });
+let decayTimer;
+$("decay").addEventListener("input", e => {
+  const was = decayOn();
+  state.decay = +e.target.value;
+  $("decay-val").textContent = DECAY[state.decay][1];
+  // switching decay on/off also switches between ranking by score and by raw time
+  if (!was && decayOn() && state.sort === "total") state.sort = "score";
+  if (was && !decayOn() && state.sort === "score") state.sort = "total";
+  $("sort").value = state.sort;
+  clearTimeout(decayTimer);
+  decayTimer = setTimeout(() => { state.page = 1; load(); }, 200);
+});
 $("size").addEventListener("change", e => { state.size = +e.target.value; state.page = 1; load(); });
 $("pager").addEventListener("click", e => {
   const b = e.target.closest("button[data-p]");

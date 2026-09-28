@@ -30,6 +30,13 @@
       </span>
     </div>
 
+    <div class="decay">
+      <label for="decay">Decay</label>
+      <input type="range" id="decay" min="0" max="8" step="1" value="0" aria-describedby="decay-note">
+      <output id="decay-val" for="decay">Off</output>
+      <span class="note" id="decay-note"></span>
+    </div>
+
     <div class="totals" id="totals" aria-live="polite"></div>
     <div class="split big" id="bigsplit"></div>
   </header>
@@ -37,6 +44,7 @@
   <div class="controls">
     <input id="q" type="search" placeholder="Search artist, track or album" aria-label="Search">
     <select id="sort" aria-label="Sort by">
+      <option value="score">Top score (with decay)</option>
       <option value="total">Most played (both)</option>
       <option value="spotify">Most played on Spotify</option>
       <option value="tidal">Most played on Tidal</option>

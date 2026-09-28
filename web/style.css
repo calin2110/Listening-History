@@ -24,6 +24,11 @@ h1{font-size:clamp(2.1rem,5.5vw,4.2rem);line-height:.98;font-weight:800;letter-s
 .custom.active input{border-color:var(--accent)}
 .custom input{padding:6px 8px;color-scheme:light dark}
 
+.decay{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:-6px 0 22px}
+.decay label{font-weight:600}
+.decay input{accent-color:var(--accent);width:min(260px,100%)}
+.decay output{font-weight:600;min-width:7ch}
+.decay .note{color:var(--muted);font-size:.9rem;flex-basis:100%}
 .totals{display:flex;flex-wrap:wrap;gap:6px 28px;color:var(--muted);margin-bottom:10px}
 .totals b{color:var(--ink);font-weight:600}
 .legend{display:inline-flex;align-items:center;gap:6px}

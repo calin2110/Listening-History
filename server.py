@@ -12,10 +12,13 @@ Then open http://127.0.0.1:8000 in your browser.
 
 API (all GET, JSON unless noted):
   /api/meta                         date range of your history, years, counts
-  /api/tracks?from=&to=&q=&sort=&page=&size=
+  /api/tracks?from=&to=&q=&sort=&page=&size=&min=&half=
                                     totals per artist + track in a time frame
                                     from/to: YYYY-MM-DD (inclusive), empty = open
                                     sort: total|spotify|tidal|plays|last|artist|title
+                                    min: minimum total minutes in the frame (e.g. 20)
+                                    half: decay half-life in days (0 = no decay);
+                                          adds a "score" per track, sort=score ranks by it
   /api/cover?k=<track key>          302 redirect to the cover image (cached)
   /api/lyrics?k=<track key>         {"text": "..."} or {"text": null} (cached)
 """
@@ -25,6 +28,7 @@ import bisect
 import csv
 import glob
 import json
+import math
 import mimetypes
 import os
 import re
@@ -172,35 +176,53 @@ class Library:
         self.id_by_key = {k: i for i, k in enumerate(self.keys)}
 
     # -- queries
-    def _aggregate(self, lo_ts, hi_ts):
+    def _aggregate(self, lo_ts, hi_ts, half_s=0.0, ref=0.0):
+        """Totals per track for plays in [lo_ts, hi_ts).
+
+        With a half-life (half_s, in seconds) each play also adds a decayed
+        score: ms * 0.5 ** (age / half_s), where age is measured back from
+        `ref`. The score is expressed in minutes, so 1 point = one minute
+        listened at the reference moment.
+        """
         lo = bisect.bisect_left(self.ts, lo_ts) if lo_ts is not None else 0
         hi = bisect.bisect_left(self.ts, hi_ts) if hi_ts is not None else len(self.ts)
+        k = math.log(2) / half_s if half_s else 0.0
         acc = {}
         for t, tid, src, ms in self.raw[lo:hi]:
             a = acc.get(tid)
             if a is None:
-                a = acc[tid] = [0, 0, 0, 0, t, t]      # sp_ms, td_ms, sp_n, td_n, first, last
+                a = acc[tid] = [0, 0, 0, 0, t, t, 0.0]  # sp_ms, td_ms, sp_n, td_n, first, last, score
             a[src] += ms
             a[2 + src] += 1
             a[5] = t                                   # raw is sorted, so this is the latest
-        rows = [(tid, a[0] + a[1], a[0], a[1], a[2] + a[3], a[4], a[5]) for tid, a in acc.items()]
+            a[6] += ms * math.exp(-k * max(ref - t, 0.0)) if k else ms
+        rows = [(tid, a[0] + a[1], a[0], a[1], a[2] + a[3], a[4], a[5], a[6] / 60000)
+                for tid, a in acc.items()]
         rows.sort(key=lambda r: -r[1])
-        return rows            # (tid, total, spotify, tidal, plays, first, last)
+        return rows            # (tid, total, spotify, tidal, plays, first, last, score)
 
-    def query(self, frm, to, q, sort, page, size, min_ms=0):
-        all_rows = self.aggregate(day_to_ts(frm), day_to_ts(to, end=True))
+    def query(self, frm, to, q, sort, page, size, min_ms=0, half_days=0):
+        lo_ts, hi_ts = day_to_ts(frm), day_to_ts(to, end=True)
+        half_s = half_days * 86400
+        # decay is measured back from the end of the frame, or from the end of today
+        today_end = (int(time.time()) // 86400 + 1) * 86400
+        ref = min(hi_ts, today_end) if hi_ts is not None else today_end
+        all_rows = self.aggregate(lo_ts, hi_ts, half_s, ref if half_s else 0.0)
         rows = [r for r in all_rows if r[1] >= min_ms] if min_ms else all_rows
         totals = {
+            "hidden": len(all_rows) - len(rows),       # tracks under the minimum
             "tracks": len(rows),
             "plays": sum(r[4] for r in rows),
             "spotify": sum(r[2] for r in rows),
             "tidal": sum(r[3] for r in rows),
+            "score": sum(r[7] for r in rows),
         }
         words = search_text(q).split()
         view = [r for r in rows if all(w in self.hay[r[0]] for w in words)] if words else list(rows)
 
         keyfn = {
             "total": None,
+            "score": lambda r: -r[7],
             "spotify": lambda r: -r[2],
             "tidal": lambda r: -r[3],
             "plays": lambda r: -r[4],
@@ -214,16 +236,17 @@ class Library:
         pages = max(1, -(-len(view) // size))
         page = min(max(1, page), pages)
         items = []
-        for tid, total, sp, td, plays, first, last in view[(page - 1) * size: page * size]:
+        for tid, total, sp, td, plays, first, last, score in view[(page - 1) * size: page * size]:
             artist, title = self.display[tid]
             uri = self.uris[tid]
             items.append({
                 "key": self.keys[tid], "artist": artist, "title": title, "album": self.albums[tid],
-                "total": total, "spotify": sp, "tidal": td, "plays": plays,
+                "total": total, "spotify": sp, "tidal": td, "plays": plays, "score": round(score, 2),
                 "first": iso_day(first), "last": iso_day(last),
                 "spotify_url": f"https://open.spotify.com/track/{uri.split(':')[-1]}" if uri else None,
             })
-        return {"totals": totals, "matched": len(view), "page": page, "pages": pages, "size": size, "items": items}
+        return {"totals": totals, "matched": len(view), "page": page, "pages": pages, "size": size,
+                "ref": iso_day(ref - 1), "items": items}
 
     def meta(self):
         dated = self.ts[bisect.bisect_right(self.ts, 0.0):]
@@ -462,10 +485,11 @@ class Handler(BaseHTTPRequestHandler):
             page = int(qs.get("page") or 1)
             size = min(max(int(qs.get("size") or 48), 1), 500)
             min_ms = max(float(qs.get("min") or 0), 0) * 60000
+            half_days = max(float(qs.get("half") or 0), 0)
         except ValueError:
-            return self.send_json({"error": "Dates must be YYYY-MM-DD; page and size must be numbers."}, 400)
+            return self.send_json({"error": "Dates must be YYYY-MM-DD; page, size, min and half must be numbers."}, 400)
         self.send_json(self.lib.query(qs.get("from") or None, qs.get("to") or None,
-                                      qs.get("q", ""), qs.get("sort", "total"), page, size, min_ms))
+                                      qs.get("q", ""), qs.get("sort", "total"), page, size, min_ms, half_days))
 
     def _track(self, qs):
         tid = self.lib.id_by_key.get(qs.get("k", ""))
