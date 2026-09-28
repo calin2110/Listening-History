@@ -11,8 +11,7 @@
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 var(--font)}
 .wrap{max-width:1240px;margin:0 auto;padding:40px 20px 80px}
 
-h1{font-size:clamp(2.1rem,5.5vw,4.2rem);line-height:.98;font-weight:800;letter-spacing:-.03em;margin:0 0 22px;max-width:18ch}
-
+h1{font-size:clamp(1.8rem,4.6vw,3.8rem);line-height:1;font-weight:800;letter-spacing:-.03em;margin:0 0 22px;text-wrap:balance}
 .frames{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:22px}
 .frames button,.frames select,.frames input,
 .controls input,.controls select,.pager button{
