@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What I listened to</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="headline">What I listened to</h1>
+
+    <div class="frames" role="group" aria-label="Time frame">
+      <button type="button" data-frame="1m">Last month</button>
+      <button type="button" data-frame="3m">3 months</button>
+      <button type="button" data-frame="6m">6 months</button>
+      <button type="button" data-frame="1y">Last year</button>
+      <button type="button" data-frame="2y">2 years</button>
+      <button type="button" data-frame="5y">5 years</button>
+      <button type="button" data-frame="all">All time</button>
+      <select id="year" aria-label="Pick a calendar year"><option value="">Year…</option></select>
+      <span class="custom">
+        <input type="date" id="from" aria-label="From date">
+        <span aria-hidden="true">to</span>
+        <input type="date" id="to" aria-label="To date">
+      </span>
+    </div>
+
+    <div class="totals" id="totals" aria-live="polite"></div>
+    <div class="split big" id="bigsplit"></div>
+  </header>
+
+  <div class="controls">
+    <input id="q" type="search" placeholder="Search artist, track or album" aria-label="Search">
+    <select id="sort" aria-label="Sort by">
+      <option value="total">Most played (both)</option>
+      <option value="spotify">Most played on Spotify</option>
+      <option value="tidal">Most played on Tidal</option>
+      <option value="plays">Most plays</option>
+      <option value="last">Recently played</option>
+      <option value="artist">Artist A–Z</option>
+      <option value="title">Track A–Z</option>
+    </select>
+    <select id="min" aria-label="Minimum listening time">
+      <option value="0">Any length</option>
+      <option value="5">At least 5 min</option>
+      <option value="20" selected>At least 20 min</option>
+      <option value="60">At least 1 hour</option>
+    </select>
+    <select id="size" aria-label="Tracks per page">
+      <option>24</option><option selected>48</option><option>96</option><option>192</option>
+    </select>
+    <span class="count" id="count"></span>
+  </div>
+
+  <ol class="grid" id="grid"></ol>
+  <nav class="pager" id="pager" aria-label="Pages"></nav>
+</div>
+
+<dialog id="dlg" aria-labelledby="dlg-title">
+  <div class="dlg-head">
+    <img id="dlg-img" alt="">
+    <div><h2 id="dlg-title"></h2><p id="dlg-sub"></p></div>
+    <button type="button" class="close" id="dlg-close" aria-label="Close">×</button>
+  </div>
+  <div class="lyrics" id="dlg-lyrics"></div>
+  <div class="dlg-foot" id="dlg-foot"></div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
