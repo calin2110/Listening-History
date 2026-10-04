@@ -14,6 +14,8 @@
   <header>
     <h1 id="headline">What I listened to</h1>
 
+    <div class="people" id="people" role="group" aria-label="Whose listening to include" hidden></div>
+
     <div class="frames" role="group" aria-label="Time frame">
       <button type="button" data-frame="1m">Last month</button>
       <button type="button" data-frame="3m">3 months</button>
@@ -36,6 +38,29 @@
       <output id="decay-val" for="decay">Off</output>
       <span class="note" id="decay-note"></span>
     </div>
+
+    <section class="joint" id="joint" aria-label="Joint ranking" hidden>
+      <div class="joint-row">
+        <label>Formula
+          <select id="formula">
+            <option value="entropy">Shared listening (entropy)</option>
+            <option value="logsum">Sum of logs (lenient)</option>
+            <option value="harmonic">Harmonic mean (strict)</option>
+          </select>
+        </label>
+        <label>Compare by
+          <select id="by">
+            <option value="plays">Plays</option>
+            <option value="minutes">Minutes</option>
+            <option value="score">Points (decayed minutes)</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="common" checked> Only songs everyone played</label>
+        <label class="check"><input type="checkbox" id="norm"> Adjust for how much each person listens</label>
+      </div>
+      <div class="weights" id="weights"></div>
+      <p class="formula" id="formula-text"></p>
+    </section>
 
     <div class="totals" id="totals" aria-live="polite"></div>
     <div class="split big" id="bigsplit"></div>

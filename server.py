@@ -3,22 +3,35 @@
 Local server for your merged Spotify + Tidal listening history.
 
     python server.py --spotify ./spotify_export --tidal ./tidal_export
-    python server.py --spotify ./spotify_export --tidal history.csv --port 8080 --open
+    python server.py --person Alice ./alice --person Bob ./bob_spotify ./bob_tidal.csv --open
 
 Then open http://127.0.0.1:8000 in your browser.
 
---spotify / --tidal accept files and/or folders (searched recursively for
-.json / .csv). Only the standard library is used.
+Each --person takes a name and any mix of files and folders: folders are
+searched recursively, .json files count as Spotify and .csv files as Tidal.
+--spotify / --tidal still work for a single person (named by --name).
+Only the standard library is used.
 
 API (all GET, JSON unless noted):
-  /api/meta                         date range of your history, years, counts
-  /api/tracks?from=&to=&q=&sort=&page=&size=&min=&half=
+  /api/meta                         date range, years, people, counts
+  /api/tracks?from=&to=&q=&sort=&page=&size=&min=&half=&people=&w=&by=&common=&formula=&norm=
                                     totals per artist + track in a time frame
                                     from/to: YYYY-MM-DD (inclusive), empty = open
                                     sort: total|spotify|tidal|plays|last|artist|title
                                     min: minimum total minutes in the frame (e.g. 20)
                                     half: decay half-life in days (0 = no decay);
                                           adds a "score" per track, sort=score ranks by it
+                                    people: person ids to include, e.g. 0,1 (default all)
+                                    w: weight per included person, e.g. 1,0.5
+                                    by: plays|minutes|score, what the joint score uses
+                                    common: 1 = only songs every included person played
+                                    formula: entropy (default) = sum w_i * v_i * log(1/P_i),
+                                             P_i = person i's share of the song
+                                             logsum = sum w_i * log(1 + v_i)
+                                             harmonic = sum(w) / sum(w_i / v_i)
+                                    norm: 1 = divide each person's values by their own
+                                          total first (so heavy listeners don't dominate)
+                                    sort=joint ranks by the joint score, sort=p<id> by one person
   /api/cover?k=<track key>          302 redirect to the cover image (cached)
   /api/lyrics?k=<track key>         {"text": "..."} or {"text": null} (cached)
 """
@@ -132,14 +145,60 @@ def day_to_ts(s, end=False):
 
 SPOTIFY, TIDAL = 0, 1
 
+# per-person record inside an aggregate: [spotify_ms, tidal_ms, plays, score_ms, first_ts, last_ts]
+SP_MS, TD_MS, PLAYS, SCORE, FIRST, LAST = range(6)
+
+MEASURES = {                                       # the per-person value the joint score uses
+    "plays": lambda r: r[PLAYS],
+    "minutes": lambda r: (r[SP_MS] + r[TD_MS]) / 60000,
+    "score": lambda r: r[SCORE] / 60000,           # decayed minutes ("points")
+}
+
+
+# Joint score formulas. v = each included person's value (plays, minutes or
+# points, possibly normalized), w = their weights. All give 0 when nobody played.
+
+def joint_entropy(v, w):
+    """Shared listening: sum of w_i * v_i * log(1 / P_i), P_i = v_i / sum(v).
+
+    Each person's listening times the log of how much the song's total exceeds
+    their own part; a person who barely shares the song adds almost nothing.
+    """
+    total = sum(v)
+    if total <= 0:
+        return 0.0
+    return sum(wi * vi * math.log(total / vi) for vi, wi in zip(v, w) if vi > 0)
+
+
+def joint_logsum(v, w):
+    """Sum of w_i * log(1 + v_i): lenient, one person can carry a song."""
+    return sum(wi * math.log1p(vi) for vi, wi in zip(v, w))
+
+
+def joint_harmonic(v, w):
+    """Weighted harmonic mean: sum(w) / sum(w_i / v_i); strict, follows the smallest side."""
+    used = [(vi, wi) for vi, wi in zip(v, w) if wi > 0]
+    if not used or any(vi <= 0 for vi, _ in used):
+        return 0.0
+    return sum(wi for _, wi in used) / sum(wi / vi for vi, wi in used)
+
+
+FORMULAS = {"entropy": joint_entropy, "logsum": joint_logsum, "harmonic": joint_harmonic}
+
 
 class Library:
     def __init__(self, fuzzy=True):
         self.fuzzy = fuzzy
+        self.people = []                               # names, index = person id
         self.key_to_id = {}
         self.keys, self.names, self.uris, self.albums = [], [], [], []
-        self.raw = []                                  # (ts, track_id, source, ms)
+        self.raw = []                                  # (ts, track_id, person_id, source, ms)
         self.undated = 0
+
+    def person(self, name):
+        if name not in self.people:
+            self.people.append(name)
+        return self.people.index(name)
 
     def _track(self, artist, title):
         key = (norm_artist(artist, self.fuzzy), norm_title(title, self.fuzzy))
@@ -152,7 +211,7 @@ class Library:
             self.albums.append(None)
         return tid
 
-    def add(self, ts, artist, title, ms, source, uri=None, album=None):
+    def add(self, pid, ts, artist, title, ms, source, uri=None, album=None):
         tid = self._track(artist, title)
         self.names[tid][(artist, title)] += ms + 1
         if uri and not self.uris[tid]:
@@ -163,7 +222,7 @@ class Library:
         if t is None:
             self.undated += 1
             t = 0.0                                    # only shows up in "all time"
-        self.raw.append((t, tid, source, ms))
+        self.raw.append((t, tid, pid, source, ms))
 
     def finalize(self):
         self.raw.sort()
@@ -174,55 +233,112 @@ class Library:
         self.sort_title = [search_text(t) for _, t in self.display]
         self.aggregate = lru_cache(maxsize=64)(self._aggregate)
         self.id_by_key = {k: i for i, k in enumerate(self.keys)}
+        self.person_stats = [{"name": n, "plays": 0, "first": None, "last": None} for n in self.people]
+        for t, _, pid, _, _ in self.raw:
+            ps = self.person_stats[pid]
+            ps["plays"] += 1
+            if t:
+                ps["first"] = ps["first"] or iso_day(t)
+                ps["last"] = t
+        for ps in self.person_stats:
+            ps["last"] = iso_day(ps["last"]) if ps["last"] else None
 
     # -- queries
     def _aggregate(self, lo_ts, hi_ts, half_s=0.0, ref=0.0):
-        """Totals per track for plays in [lo_ts, hi_ts).
+        """Per track, per person totals for plays in [lo_ts, hi_ts).
 
-        With a half-life (half_s, in seconds) each play also adds a decayed
-        score: ms * 0.5 ** (age / half_s), where age is measured back from
-        `ref`. The score is expressed in minutes, so 1 point = one minute
-        listened at the reference moment.
+        Returns {track_id: [record or None for each person]}. With a half-life
+        (half_s, seconds) every play also adds ms * 0.5 ** (age / half_s) to
+        the record's score, with age measured back from `ref`.
         """
         lo = bisect.bisect_left(self.ts, lo_ts) if lo_ts is not None else 0
         hi = bisect.bisect_left(self.ts, hi_ts) if hi_ts is not None else len(self.ts)
         k = math.log(2) / half_s if half_s else 0.0
+        n_people = len(self.people)
         acc = {}
-        for t, tid, src, ms in self.raw[lo:hi]:
-            a = acc.get(tid)
-            if a is None:
-                a = acc[tid] = [0, 0, 0, 0, t, t, 0.0]  # sp_ms, td_ms, sp_n, td_n, first, last, score
-            a[src] += ms
-            a[2 + src] += 1
-            a[5] = t                                   # raw is sorted, so this is the latest
-            a[6] += ms * math.exp(-k * max(ref - t, 0.0)) if k else ms
-        rows = [(tid, a[0] + a[1], a[0], a[1], a[2] + a[3], a[4], a[5], a[6] / 60000)
-                for tid, a in acc.items()]
-        rows.sort(key=lambda r: -r[1])
-        return rows            # (tid, total, spotify, tidal, plays, first, last, score)
+        for t, tid, pid, src, ms in self.raw[lo:hi]:
+            recs = acc.get(tid)
+            if recs is None:
+                recs = acc[tid] = [None] * n_people
+            r = recs[pid]
+            if r is None:
+                r = recs[pid] = [0, 0, 0, 0.0, t, t]
+            r[src] += ms
+            r[PLAYS] += 1
+            r[LAST] = t                                # raw is sorted, so this is the latest
+            r[SCORE] += ms * math.exp(-k * max(ref - t, 0.0)) if k else ms
+        return acc
 
-    def query(self, frm, to, q, sort, page, size, min_ms=0, half_days=0):
+    def query(self, frm, to, q, sort, page, size, min_ms=0, half_days=0,
+              people=None, weights=None, by="plays", common=True, formula="entropy", normalize=False):
         lo_ts, hi_ts = day_to_ts(frm), day_to_ts(to, end=True)
         half_s = half_days * 86400
         # decay is measured back from the end of the frame, or from the end of today
         today_end = (int(time.time()) // 86400 + 1) * 86400
         ref = min(hi_ts, today_end) if hi_ts is not None else today_end
-        all_rows = self.aggregate(lo_ts, hi_ts, half_s, ref if half_s else 0.0)
-        rows = [r for r in all_rows if r[1] >= min_ms] if min_ms else all_rows
+        agg = self.aggregate(lo_ts, hi_ts, half_s, ref if half_s else 0.0)
+
+        sel = people or list(range(len(self.people)))
+        weights = (list(weights or []) + [1.0] * len(sel))[:len(sel)]
+        joint_mode = len(sel) > 1
+        measure = MEASURES.get(by, MEASURES["plays"])
+        joint_fn = FORMULAS.get(formula, joint_entropy)
+
+        # Normalizing divides each person's value by their own total in this frame,
+        # then scales back by the average total, so the numbers stay readable and
+        # someone who listens 5x more doesn't dominate.
+        scale = [1.0] * len(sel)
+        if normalize and joint_mode:
+            person_tot = [0.0] * len(sel)
+            for recs in agg.values():
+                for j, pid in enumerate(sel):
+                    if recs[pid]:
+                        person_tot[j] += measure(recs[pid])
+            avg = sum(person_tot) / len(sel)
+            scale = [avg / t if t > 0 else 0.0 for t in person_tot]
+
+        rows, hidden, not_common = [], 0, 0
+        per_person = [{"ms": 0, "plays": 0, "score": 0.0} for _ in sel]
+        for tid, recs in agg.items():
+            ps = [recs[i] for i in sel]
+            played = [p for p in ps if p]
+            if not played:
+                continue
+            if joint_mode and common and len(played) < len(ps):
+                not_common += 1
+                continue
+            sp = sum(p[SP_MS] for p in played)
+            td = sum(p[TD_MS] for p in played)
+            total = sp + td
+            if total < min_ms:
+                hidden += 1
+                continue
+            for j, p in enumerate(ps):
+                if p:
+                    per_person[j]["ms"] += p[SP_MS] + p[TD_MS]
+                    per_person[j]["plays"] += p[PLAYS]
+                    per_person[j]["score"] += p[SCORE] / 60000
+            joint = joint_fn([measure(p) * sc if p else 0.0 for p, sc in zip(ps, scale)], weights)
+            rows.append((tid, total, sp, td, sum(p[PLAYS] for p in played),
+                         min(p[FIRST] for p in played), max(p[LAST] for p in played),
+                         sum(p[SCORE] for p in played) / 60000, joint, ps))
+        # rows: (tid, total, spotify, tidal, plays, first, last, score, joint, per-person records)
+
         totals = {
-            "hidden": len(all_rows) - len(rows),       # tracks under the minimum
-            "tracks": len(rows),
+            "tracks": len(rows), "hidden": hidden, "not_common": not_common,
             "plays": sum(r[4] for r in rows),
-            "spotify": sum(r[2] for r in rows),
-            "tidal": sum(r[3] for r in rows),
+            "spotify": sum(r[2] for r in rows), "tidal": sum(r[3] for r in rows),
             "score": sum(r[7] for r in rows),
+            "people": per_person,
         }
         words = search_text(q).split()
-        view = [r for r in rows if all(w in self.hay[r[0]] for w in words)] if words else list(rows)
+        view = [r for r in rows if all(w in self.hay[r[0]] for w in words)] if words else rows
 
+        view.sort(key=lambda r: -r[1])                 # tie-break for every sort: total time
         keyfn = {
             "total": None,
             "score": lambda r: -r[7],
+            "joint": lambda r: -r[8],
             "spotify": lambda r: -r[2],
             "tidal": lambda r: -r[3],
             "plays": lambda r: -r[4],
@@ -230,23 +346,29 @@ class Library:
             "artist": lambda r: (self.sort_artist[r[0]], self.sort_title[r[0]]),
             "title": lambda r: (self.sort_title[r[0]], self.sort_artist[r[0]]),
         }.get(sort)
+        m = re.fullmatch(r"p(\d+)", sort or "")        # "p<person id>": most by that person
+        if m and int(m.group(1)) in sel:
+            j = sel.index(int(m.group(1)))
+            keyfn = lambda r: -(measure(r[9][j]) if r[9][j] else -1)
         if keyfn:
             view.sort(key=keyfn)
 
         pages = max(1, -(-len(view) // size))
         page = min(max(1, page), pages)
         items = []
-        for tid, total, sp, td, plays, first, last, score in view[(page - 1) * size: page * size]:
+        for tid, total, sp, td, plays, first, last, score, joint, ps in view[(page - 1) * size: page * size]:
             artist, title = self.display[tid]
             uri = self.uris[tid]
             items.append({
                 "key": self.keys[tid], "artist": artist, "title": title, "album": self.albums[tid],
                 "total": total, "spotify": sp, "tidal": td, "plays": plays, "score": round(score, 2),
-                "first": iso_day(first), "last": iso_day(last),
+                "joint": round(joint, 3), "first": iso_day(first), "last": iso_day(last),
+                "per": [{"ms": p[SP_MS] + p[TD_MS], "plays": p[PLAYS], "score": round(p[SCORE] / 60000, 2),
+                         "first": iso_day(p[FIRST]), "last": iso_day(p[LAST])} if p else None for p in ps],
                 "spotify_url": f"https://open.spotify.com/track/{uri.split(':')[-1]}" if uri else None,
             })
         return {"totals": totals, "matched": len(view), "page": page, "pages": pages, "size": size,
-                "ref": iso_day(ref - 1), "items": items}
+                "ref": iso_day(ref - 1), "people": sel, "items": items}
 
     def meta(self):
         dated = self.ts[bisect.bisect_right(self.ts, 0.0):]
@@ -263,6 +385,7 @@ class Library:
             "first": iso_day(dated[0]) if dated else None,
             "last": iso_day(dated[-1]) if dated else None,
             "years": years,
+            "people": self.person_stats,
             "tracks": len(self.keys),
             "plays": len(self.raw),
             "undated_plays": self.undated,
@@ -281,7 +404,7 @@ def expand_paths(paths, ext):
     return out
 
 
-def load_spotify(paths, lib):
+def load_spotify(paths, lib, pid):
     files, n = expand_paths(paths, ".json"), 0
     for f in files:
         try:
@@ -303,13 +426,13 @@ def load_spotify(paths, lib):
                 ms, ts = e.get("msPlayed"), e.get("endTime")
             if not artist or not title:
                 continue                               # podcasts, audiobooks, video
-            lib.add(ts, artist, title, int(ms or 0), SPOTIFY,
+            lib.add(pid, ts, artist, title, int(ms or 0), SPOTIFY,
                     e.get("spotify_track_uri"), e.get("master_metadata_album_album_name"))
             n += 1
-    print(f"Spotify: {n:,} plays from {len(files)} file(s)")
+    print(f"  Spotify: {n:,} plays from {len(files)} file(s)")
 
 
-def load_tidal(paths, lib):
+def load_tidal(paths, lib, pid):
     files, n = expand_paths(paths, ".csv"), 0
     for f in files:
         with open(f, encoding="utf-8-sig", newline="") as fh:
@@ -321,9 +444,9 @@ def load_tidal(paths, lib):
                     ms = int(float(row.get("stream_duration_ms") or 0))
                 except ValueError:
                     ms = 0
-                lib.add(row.get("entry_date"), artist, title, ms, TIDAL)
+                lib.add(pid, row.get("entry_date"), artist, title, ms, TIDAL)
                 n += 1
-    print(f"Tidal:   {n:,} plays from {len(files)} file(s)")
+    print(f"  Tidal:   {n:,} plays from {len(files)} file(s)")
 
 
 # ------------------------------------------------------------------ caches --
@@ -367,12 +490,12 @@ class JsonCache:
 NET = threading.BoundedSemaphore(4)                    # max parallel outgoing requests
 
 
-def http_json(url, retries=3):
+def http_json(url, retries=3, timeout=15):
     for attempt in range(retries):
         try:
             with NET:
                 req = urllib.request.Request(url, headers={"User-Agent": UA})
-                with urllib.request.urlopen(req, timeout=15) as r:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
                     return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -393,11 +516,12 @@ def lookup_cover(uri, artist, title):
     if uri:
         tid = uri.split(":")[-1]
         d = http_json("https://open.spotify.com/oembed?url=" +
-                      urllib.parse.quote(f"https://open.spotify.com/track/{tid}", safe=""))
+                      urllib.parse.quote(f"https://open.spotify.com/track/{tid}", safe=""), retries=1, timeout=6)
         if d and d.get("thumbnail_url"):
             return d["thumbnail_url"]
     q = urllib.parse.urlencode({"term": f"{artist} {title}", "entity": "song", "limit": 5})
-    d = http_json("https://itunes.apple.com/search?" + q)
+    # fail fast: covers block browser connections while they load; a miss is retried next time
+    d = http_json("https://itunes.apple.com/search?" + q, retries=1, timeout=6)
     if not d or not d.get("results"):
         return None
     a = search_text(artist)
@@ -478,6 +602,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(self.lib.meta())
 
     def api_tracks(self, qs):
+        n_people = len(self.lib.people)
         try:
             for k in ("from", "to"):
                 if qs.get(k):
@@ -486,10 +611,23 @@ class Handler(BaseHTTPRequestHandler):
             size = min(max(int(qs.get("size") or 48), 1), 500)
             min_ms = max(float(qs.get("min") or 0), 0) * 60000
             half_days = max(float(qs.get("half") or 0), 0)
+            people = []
+            for x in (qs.get("people") or "").split(","):
+                if x.strip():
+                    pid = int(x)
+                    if not 0 <= pid < n_people:
+                        raise ValueError
+                    if pid not in people:
+                        people.append(pid)
+            weights = [float(x) for x in (qs.get("w") or "").split(",") if x.strip()]
         except ValueError:
-            return self.send_json({"error": "Dates must be YYYY-MM-DD; page, size, min and half must be numbers."}, 400)
-        self.send_json(self.lib.query(qs.get("from") or None, qs.get("to") or None,
-                                      qs.get("q", ""), qs.get("sort", "total"), page, size, min_ms, half_days))
+            return self.send_json({"error": "Bad parameter: dates must be YYYY-MM-DD; page, size, min, half, "
+                                            "people and w must be numbers (people must exist)."}, 400)
+        self.send_json(self.lib.query(
+            qs.get("from") or None, qs.get("to") or None, qs.get("q", ""), qs.get("sort", "total"),
+            page, size, min_ms, half_days, people, weights,
+            qs.get("by", "plays"), qs.get("common", "1") != "0",
+            qs.get("formula", "entropy"), qs.get("norm", "0") == "1"))
 
     def _track(self, qs):
         tid = self.lib.id_by_key.get(qs.get("k", ""))
@@ -545,8 +683,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--spotify", nargs="*", default=[], help="Spotify JSON files and/or folders")
-    ap.add_argument("--tidal", nargs="*", default=[], help="Tidal CSV files and/or folders")
+    ap.add_argument("--person", nargs="+", action="append", default=[], metavar=("NAME", "PATH"),
+                    help="a person's name followed by their export files and/or folders "
+                         "(.json = Spotify, .csv = Tidal); repeat for each person")
+    ap.add_argument("--spotify", nargs="*", default=[], help="Spotify JSON files and/or folders (for --name)")
+    ap.add_argument("--tidal", nargs="*", default=[], help="Tidal CSV files and/or folders (for --name)")
+    ap.add_argument("--name", default="Me", help="whose data --spotify/--tidal are (default: Me)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--web", default=os.path.join(HERE, "web"), help="folder with index.html, app.js, style.css")
@@ -557,14 +699,28 @@ def main():
     ap.add_argument("--open", action="store_true", help="open the page in your browser")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
     args = ap.parse_args()
-    if not args.spotify and not args.tidal:
-        ap.error("give at least one of --spotify / --tidal")
+    if not args.spotify and not args.tidal and not args.person:
+        ap.error("give --person NAME PATH... (repeatable), or --spotify / --tidal")
 
     lib = Library(fuzzy=not args.strict)
-    if args.spotify:
-        load_spotify(args.spotify, lib)
-    if args.tidal:
-        load_tidal(args.tidal, lib)
+    if args.spotify or args.tidal:
+        pid = lib.person(args.name)
+        print(f"{args.name}:")
+        if args.spotify:
+            load_spotify(args.spotify, lib, pid)
+        if args.tidal:
+            load_tidal(args.tidal, lib, pid)
+    for name, *paths in args.person:
+        if not paths:
+            ap.error(f"--person {name}: give at least one file or folder after the name")
+        pid = lib.person(name)
+        print(f"{name}:")
+        sp = [p for p in paths if os.path.isdir(p) or p.lower().endswith(".json")]
+        td = [p for p in paths if os.path.isdir(p) or p.lower().endswith(".csv")]
+        if sp:
+            load_spotify(sp, lib, pid)
+        if td:
+            load_tidal(td, lib, pid)
     lib.finalize()
     m = lib.meta()
     print(f"Tracks:  {m['tracks']:,} unique artist + title pairs, history {m['first']} to {m['last']}")
