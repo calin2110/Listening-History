@@ -3,8 +3,8 @@
 const $ = id => document.getElementById(id);
 const state = {
   frame: "all", from: "", to: "", q: "", sort: "total", min: 20, decay: 0, size: 48, page: 1,
-  people: [], weights: {}, by: "plays", common: true,       // multi-person
-  formula: "entropy", norm: false,
+  people: [], weights: {}, by: "plays", common: true, formula: "entropy", norm: false,   // multi-person
+  level: "track", view: "top", gap: 365, minplay: true,
 };
 let META = {people: [], years: []}, items = [], lastData = null, ctrl = null;
 
@@ -16,22 +16,25 @@ const PRESETS = {  // months back, headline phrase
 // slider stops: [half-life in days, label]; 0 = no decay
 const DECAY = [[0, "Off"], [7, "1 week"], [14, "2 weeks"], [30, "1 month"], [91, "3 months"],
                [182, "6 months"], [365, "1 year"], [730, "2 years"], [1826, "5 years"]];
+const GAPS = {91: "3 months", 182: "6 months", 365: "a year", 730: "2 years"};
 const COLORS = ["#e8590c", "#7048e8", "#d6336c", "#0c8599", "#f59f00", "#5c7cfa", "#2f9e44", "#868e96"];
 const BY_LABEL = {plays: "plays", minutes: "minutes", score: "points"};
 const FORMULAS = ["entropy", "logsum", "harmonic"];
+const LEVELS = {track: ["song", "songs"], artist: ["artist", "artists"], album: ["album", "albums"]};
 
 const enc = encodeURIComponent;
 const decayOn = () => state.decay > 0;
 const joint = () => state.people.length > 1;
-const color = pid => COLORS[pid % COLORS.length];
+const color = pid => META.people.length > 1 ? COLORS[pid % COLORS.length] : "var(--accent)";
 const pname = pid => META.people[pid]?.name ?? "Person " + (pid + 1);
 const weight = pid => state.weights[pid] ?? 1;
+const noun = (n = 2) => LEVELS[state.level][n === 1 ? 0 : 1];
 
 function isoDay(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 function niceDay(s) {
-  return new Date(s + "T00:00").toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
+  return s ? new Date(s + "T00:00").toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"}) : "";
 }
 function fmt(ms) {
   const m = Math.round(ms / 60000);
@@ -41,8 +44,9 @@ function fmt(ms) {
   return h.toLocaleString() + " h" + (r ? " " + r + " min" : "");
 }
 function hours(ms) { return (ms / 3.6e6).toLocaleString(undefined, {maximumFractionDigits: ms < 3.6e7 ? 1 : 0}) + " hours"; }
-function jointFmt(v) { return v.toLocaleString(undefined, {maximumFractionDigits: v < 10 ? 2 : v < 100 ? 1 : 0}); }
 function pts(v) { return v.toLocaleString(undefined, {maximumFractionDigits: v < 100 ? 1 : 0}); }
+function jointFmt(v) { return v.toLocaleString(undefined, {maximumFractionDigits: v < 10 ? 2 : v < 100 ? 1 : 0}); }
+function pct(x) { return Math.round(x * 100) + "%"; }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 }
@@ -50,13 +54,12 @@ function listNames(pids) {
   const n = pids.map(pname);
   return n.length <= 1 ? (n[0] || "") : n.slice(0, -1).join(", ") + " & " + n[n.length - 1];
 }
-// generic stacked bar: parts = [[value, cssColor], ...]
+// stacked bar: parts = [[value, cssColor], ...]
 function bar(parts) {
   const t = parts.reduce((a, [v]) => a + v, 0) || 1;
   return parts.map(([v, c]) => `<i style="width:${v / t * 100}%;--c:${c}"></i>`).join("");
 }
 const sourceBar = (sp, td) => bar([[sp, "var(--spotify)"], [td, "var(--tidal)"]]);
-// one person's value in the measure the joint score uses
 function measure(p) {
   if (!p) return 0;
   return state.by === "plays" ? p.plays : state.by === "minutes" ? p.ms / 60000 : p.score;
@@ -66,6 +69,18 @@ function measureText(p) {
   if (state.by === "plays") return p.plays.toLocaleString() + (p.plays === 1 ? " play" : " plays");
   if (state.by === "minutes") return fmt(p.ms);
   return pts(p.score) + " pts";
+}
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove("show"), 6000);
+}
+const regionNames = (() => { try { return new Intl.DisplayNames(undefined, {type: "region"}); } catch { return null; } })();
+function placeName(p) {
+  if (p.startsWith("c:")) { try { return regionNames?.of(p.slice(2)) || p.slice(2); } catch { return p.slice(2); } }
+  return p.slice(2);
 }
 
 // ------------------------------------------------------------ time frames --
@@ -79,7 +94,6 @@ function rangeFor(frame) {
   if (/^y\d{4}$/.test(frame)) return [frame.slice(1) + "-01-01", frame.slice(1) + "-12-31"];
   return [state.from, state.to];                        // custom
 }
-
 function frameLabel() {
   if (PRESETS[state.frame]) return PRESETS[state.frame][1];
   if (/^y\d{4}$/.test(state.frame)) return "in " + state.frame.slice(1);
@@ -89,10 +103,22 @@ function frameLabel() {
   }
   return META.first ? "since " + META.first.slice(0, 4) : "of all time";
 }
-
 function subject() {
   if (META.people.length <= 1 && (!META.people.length || pname(0) === "Me")) return "I";
   return listNames(state.people);
+}
+function headline() {
+  const subj = subject();
+  if (state.view === "rediscover") {
+    const verb = subj === "I" || state.people.length > 1 ? "haven't" : "hasn't";
+    return `What ${subj} ${verb} played in ${GAPS[state.gap] || state.gap + " days"}`;
+  }
+  const m = /^d(\d+)$/.exec(state.view);
+  if (m) {
+    const pid = +m[1], others = state.people.filter(p => p !== pid);
+    return `What ${pname(pid)} listens to that ${listNames(others)} ${others.length > 1 ? "have" : "has"} never played`;
+  }
+  return `What ${subj} listened to ${frameLabel()}`;
 }
 
 function setFrame(frame, from, to) {
@@ -101,12 +127,37 @@ function setFrame(frame, from, to) {
   if (state.from && state.to && state.from > state.to) [state.from, state.to] = [state.to, state.from];
   state.page = 1;
   syncUI();
-  load();
+  refresh();
 }
 
 // ------------------------------------------------------------- UI syncing --
+function viewOptions() {
+  const opts = [["top", "Top " + noun()], ["rediscover", "Not played lately"]];
+  if (joint()) {
+    state.people.forEach(pid => {
+      const others = state.people.filter(p => p !== pid);
+      opts.push(["d" + pid, `${pname(pid)}’s, new to ${listNames(others)}`]);
+    });
+  }
+  return opts;
+}
+function sortOptions() {
+  const opts = joint()
+    ? [["joint", "Joint score"], ...state.people.map(pid => ["p" + pid, `Most ${BY_LABEL[state.by]} by ${pname(pid)}`]),
+       ["score", "Top points (with decay), combined"], ["total", "Most time, combined"]]
+    : [["score", "Top score (with decay)"], ["total", "Most played (both)"]];
+  if (state.view === "top") opts.push(["climb", "Biggest climbers"]);
+  opts.push(["spotify", "Most played on Spotify"], ["tidal", "Most played on Tidal"], ["plays", "Most plays"],
+            ["last", "Recently played"], ["skip_hi", "Most skipped"], ["skip_lo", "Least skipped"]);
+  if (state.level === "track") opts.push(["artist", "Artist A–Z"], ["title", "Song A–Z"]);
+  else if (state.level === "album") opts.push(["artist", "Artist A–Z"], ["title", "Album A–Z"]);
+  else opts.push(["title", "Name A–Z"]);
+  return opts;
+}
+function defaultSort() { return joint() ? "joint" : decayOn() ? "score" : "total"; }
+
 function syncUI() {
-  document.querySelectorAll(".frames button").forEach(b =>
+  document.querySelectorAll("#frames button").forEach(b =>
     b.setAttribute("aria-pressed", String(b.dataset.frame === state.frame)));
   const isYear = /^y\d{4}$/.test(state.frame);
   $("year").value = isYear ? state.frame.slice(1) : "";
@@ -114,9 +165,12 @@ function syncUI() {
   document.querySelector(".custom").classList.toggle("active", state.frame === "custom");
   $("from").value = state.from;
   $("to").value = state.to;
-  $("headline").textContent = `What ${subject()} listened to ${frameLabel()}`;
+  const redisc = state.view === "rediscover";
+  $("frames").hidden = redisc;
+  $("frame-note").hidden = !redisc;
+  $("headline").textContent = headline();
+  document.title = $("headline").textContent;
 
-  // people chips
   if (META.people.length > 1) {
     $("people").hidden = false;
     $("people").innerHTML = META.people.map((p, pid) => {
@@ -126,7 +180,6 @@ function syncUI() {
     }).join("");
   }
 
-  // joint panel
   $("joint").hidden = !joint();
   if (joint()) {
     $("by").value = state.by;
@@ -140,22 +193,29 @@ function syncUI() {
     syncFormula();
   }
 
-  // sort options depend on solo vs joint
-  const opts = joint()
-    ? [["joint", "Joint score"], ...state.people.map(pid => ["p" + pid, `Most ${BY_LABEL[state.by]} by ${pname(pid)}`]),
-       ["score", "Top points (with decay), combined"], ["total", "Most time, combined"]]
-    : [["score", "Top score (with decay)"], ["total", "Most played (both)"]];
-  opts.push(["spotify", "Most played on Spotify"], ["tidal", "Most played on Tidal"], ["plays", "Most plays"],
-            ["last", "Recently played"], ["artist", "Artist A–Z"], ["title", "Track A–Z"]);
-  if (!opts.some(([v]) => v === state.sort)) state.sort = defaultSort();
-  $("sort").innerHTML = opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
+  document.querySelectorAll("#level button").forEach(b =>
+    b.setAttribute("aria-selected", String(b.dataset.level === state.level)));
+  const vopts = viewOptions();
+  if (!vopts.some(([v]) => v === state.view)) state.view = "top";
+  $("view").innerHTML = vopts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
+  $("view").value = state.view;
+  $("gap-wrap").hidden = state.view !== "rediscover";
+  $("gap").value = String(state.gap);
+  $("copy").disabled = state.level !== "track";
+  $("copy").title = state.level === "track" ? "" : "Switch to Songs to copy a playlist";
+
+  const sopts = sortOptions();
+  if (!sopts.some(([v]) => v === state.sort)) state.sort = defaultSort();
+  $("sort").innerHTML = sopts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
   $("sort").value = state.sort;
 
   $("q").value = state.q;
+  $("q").placeholder = "Search " + noun();
   $("min").value = String(state.min);
   $("size").value = String(state.size);
   $("decay").value = String(state.decay);
   $("decay-val").textContent = DECAY[state.decay][1];
+  $("minplay").checked = state.minplay;
 }
 
 function syncFormula() {
@@ -171,37 +231,45 @@ function syncFormula() {
       "). Anyone at zero makes it zero, so it follows whoever listened least.";
   } else {
     text = "Joint score = " + state.people.map(pid => `${w(pid)} × ${val(pid)} × log(1 / P(${pname(pid)}))`).join(" + ") +
-      `, where P(x) is x’s share of the song’s ${by}. Nobody can carry a song alone.`;
+      `, where P(x) is x’s share of the ${noun(1)}’s ${by}. Nobody can carry a ${noun(1)} alone.`;
   }
   if (state.norm) text += ` Each person’s ${by} are first divided by their own total in this time frame.`;
-  let note = "";
-  if (state.by === "score" && !decayOn()) note = " With decay off, points are the same as minutes.";
-  if (state.by !== "score" && decayOn()) note = " Decay only changes the ranking when comparing by points.";
-  $("formula-text").textContent = text + note;
+  if (state.by === "score" && !decayOn()) text += " With decay off, points are the same as minutes.";
+  if (state.by !== "score" && decayOn()) text += " Decay only changes the ranking when comparing by points.";
+  $("formula-text").textContent = text;
 }
 
-function defaultSort() { return joint() ? "joint" : decayOn() ? "score" : "total"; }
-
 // ---------------------------------------------------------------- loading --
+function baseParams() {
+  const redisc = state.view === "rediscover";
+  return {
+    from: redisc ? "" : state.from, to: redisc ? "" : state.to,
+    people: state.people.join(","), by: state.by, half: DECAY[state.decay][0], minplay: state.minplay ? 30 : 0,
+  };
+}
+function listParams(extra = {}) {
+  return new URLSearchParams({
+    ...baseParams(), q: state.q, sort: state.sort, min: state.min, page: state.page, size: state.size,
+    w: state.people.map(weight).join(","), common: state.common ? 1 : 0, formula: state.formula,
+    norm: state.norm ? 1 : 0, level: state.level, view: state.view, gap: state.gap, ...extra,
+  });
+}
+
+function refresh() { load(); if ($("insights").open) loadInsights(); }
+
 async function load() {
   ctrl?.abort();
   const mine = ctrl = new AbortController();
   $("grid").setAttribute("aria-busy", "true");
-  const p = new URLSearchParams({
-    from: state.from, to: state.to, q: state.q, sort: state.sort, min: state.min,
-    half: DECAY[state.decay][0], page: state.page, size: state.size,
-    people: state.people.join(","), w: state.people.map(weight).join(","),
-    by: state.by, common: state.common ? 1 : 0, formula: state.formula, norm: state.norm ? 1 : 0,
-  });
   try {
-    const r = await fetch("/api/tracks?" + p, {signal: mine.signal});
+    const r = await fetch("/api/tracks?" + listParams(), {signal: mine.signal});
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
     state.page = d.page;
     render(d);
   } catch (e) {
     if (e.name === "AbortError") return;
-    $("grid").innerHTML = `<li class="empty">Couldn't load tracks (${esc(e.message)}). Check that server.py is still running, then reload the page.</li>`;
+    $("grid").innerHTML = `<li class="empty">Couldn't load ${noun()} (${esc(e.message)}). Check that server.py is still running, then reload the page.</li>`;
     $("pager").innerHTML = "";
   } finally {
     if (ctrl === mine) $("grid").removeAttribute("aria-busy");
@@ -214,17 +282,16 @@ function render(d) {
   const t = d.totals, sel = d.people, isJoint = sel.length > 1;
   const total = t.spotify + t.tidal;
 
-  // header totals + big bar
   if (!t.tracks) {
     $("totals").innerHTML = "";
   } else if (isJoint) {
     $("totals").innerHTML =
-      `<span><b>${hours(total)}</b> across <b>${t.tracks.toLocaleString()}</b> ${state.common ? "songs in common" : "songs"}</span>` +
+      `<span><b>${hours(total)}</b> across <b>${t.tracks.toLocaleString()}</b> ${state.common && state.view === "top" ? noun() + " in common" : noun()}</span>` +
       sel.map((pid, j) => `<span class="legend" style="--c:${color(pid)}">${esc(pname(pid))} ${hours(t.people[j].ms)}, ` +
         `${t.people[j].plays.toLocaleString()} plays</span>`).join("");
   } else {
     $("totals").innerHTML =
-      `<span><b>${hours(total)}</b> across <b>${t.tracks.toLocaleString()}</b> tracks and ${t.plays.toLocaleString()} plays</span>` +
+      `<span><b>${hours(total)}</b> across <b>${t.tracks.toLocaleString()}</b> ${noun()} and ${t.plays.toLocaleString()} plays</span>` +
       `<span class="legend" style="--c:var(--spotify)">Spotify ${hours(t.spotify)}</span>` +
       `<span class="legend" style="--c:var(--tidal)">Tidal ${hours(t.tidal)}</span>` +
       (decayOn() ? `<span>Score <b>${pts(t.score)}</b></span>` : "");
@@ -235,61 +302,105 @@ function render(d) {
     ? `A minute played ${DECAY[state.decay][1]} before ${niceDay(d.ref)} counts half as much, ` +
       `${DECAY[state.decay][1]} before that a quarter, and so on. Score = weighted minutes.`
     : "Every minute counts the same. Slide to make recent listening count more.";
+  if (d.cutoff) {
+    $("frame-note").textContent = `${noun()[0].toUpperCase() + noun().slice(1)} played before ${niceDay(d.cutoff)} ` +
+      `and not since, ranked by how much ${state.people.length > 1 ? "you" : subject() === "I" ? "you" : pname(sel[0])} played them back then. ` +
+      `Time frames don't apply to this view.`;
+  }
+
+  // taste match line in the joint panel
+  $("match").hidden = !d.match?.length;
+  if (d.match?.length) {
+    $("match").innerHTML = d.match.map(m =>
+      `${d.match.length > 1 ? esc(pname(m.a) + " & " + pname(m.b)) + ": " : "Taste match: "}${pct(m.songs)} on songs, ` +
+      `${pct(m.artists)} on artists <span>(${m.shared_songs.toLocaleString()} songs in common)</span>`).join("<br>");
+  }
 
   const extra = [];
   if (t.hidden) extra.push(`${t.hidden.toLocaleString()} shorter hidden`);
   if (isJoint && t.not_common) extra.push(`${t.not_common.toLocaleString()} not shared`);
   $("count").textContent = (d.matched === t.tracks
-    ? `${t.tracks.toLocaleString()} ${isJoint ? "songs" : "tracks"}`
+    ? `${t.tracks.toLocaleString()} ${noun(t.tracks)}`
     : `${d.matched.toLocaleString()} of ${t.tracks.toLocaleString()}`) + (extra.length ? ", " + extra.join(", ") : "");
 
-  // grid
   items = d.items;
-  const start = (d.page - 1) * d.size;
-  let empty = null;
-  if (!t.tracks && isJoint && state.common && t.not_common) {
-    empty = `${listNames(sel)} have no songs in common in this time frame${t.hidden ? " that reach the minimum time" : ""}. ` +
-            `${t.not_common.toLocaleString()} songs were played by only some of you. ` +
-            `Untick “Only songs everyone played”, pick a wider frame, or lower the minimum.`;
-  } else if (!t.tracks && t.hidden) {
-    empty = `No track reached ${$("min").selectedOptions[0].text.toLowerCase()} in this time frame ` +
-            `(${t.hidden.toLocaleString()} shorter ones are hidden). Lower the minimum or pick a wider frame.`;
-  } else if (!t.tracks) {
-    const range = META.first ? ` The history runs from ${niceDay(META.first)} to ${niceDay(META.last)}.` : "";
-    empty = `Nothing was played in this time frame.${range} Pick a wider frame or a different year.`;
-  } else if (!items.length) {
-    empty = `No tracks match “${state.q}” in this time frame. Try a shorter search or a wider frame.`;
-  }
+  const empty = emptyMessage(d);
   if (empty) {
     $("grid").innerHTML = `<li class="empty">${esc(empty)}</li>`;
   } else {
-    $("grid").innerHTML = items.map((r, i) => {
-      let stats;
-      if (isJoint) {
-        stats = `<div class="time"><b>${jointFmt(r.joint)}</b><span>joint score</span></div>
-          <ul class="who">${sel.map((pid, j) => `<li class="${r.per[j] ? "" : "none"}" style="--c:${color(pid)}">
-            <span>${esc(pname(pid))}</span><span>${measureText(r.per[j])}</span></li>`).join("")}</ul>
-          <div class="split" title="Share of ${BY_LABEL[state.by]}">${bar(sel.map((pid, j) => [measure(r.per[j]), color(pid)]))}</div>`;
-      } else {
-        stats = `<div class="time">${decayOn()
-            ? `<b>${pts(r.score)} pts</b><span>${fmt(r.total)}</span>`
-            : `<b>${fmt(r.total)}</b><span>${r.plays.toLocaleString()} plays</span>`}</div>
-          <div class="split" title="Spotify ${fmt(r.spotify)} / Tidal ${fmt(r.tidal)}">${sourceBar(r.spotify, r.tidal)}</div>`;
-      }
-      return `<li class="item">
-        <button type="button" class="cover" data-i="${i}" aria-label="Lyrics for ${esc(r.title)} by ${esc(r.artist)}">
-          <span class="ph">${esc((r.artist[0] || "?").toUpperCase())}</span>
-          <img src="/api/cover?k=${enc(r.key)}" alt="" loading="lazy" referrerpolicy="no-referrer">
-          <span class="rank">${start + i + 1}</span><span class="hint">Show lyrics</span>
-        </button>
-        <div class="meta">
-          <div class="title" title="${esc(r.title)}">${esc(r.title)}</div>
-          <div class="artist" title="${esc(r.artist)}">${esc(r.artist)}</div>
-          ${stats}
-        </div></li>`;
-    }).join("");
+    $("grid").innerHTML = items.map((r, i) => card(r, i, d)).join("");
   }
   renderPager(d.page, d.pages);
+}
+
+function emptyMessage(d) {
+  const t = d.totals, sel = d.people;
+  if (t.tracks && !d.items.length) return `No ${noun()} match “${state.q}”. Try a shorter search.`;
+  if (t.tracks) return null;
+  if (d.view === "discover") {
+    const m = /^d(\d+)$/.exec(state.view), pid = m ? +m[1] : sel[0];
+    return `Everything ${pname(pid)} played in this time frame, ${listNames(sel.filter(p => p !== pid))} has played too` +
+      (t.hidden ? `, or it's under the minimum time (${t.hidden.toLocaleString()} hidden). Lower the minimum` : ". Try a wider frame") + ".";
+  }
+  if (d.view === "rediscover") {
+    return `Nothing fits: everything played before ${niceDay(d.cutoff)}` +
+      (t.hidden ? ` that reaches the minimum time` : "") + ` has been played since. Try a shorter gap or lower the minimum.`;
+  }
+  if (sel.length > 1 && state.common && t.not_common) {
+    return `${listNames(sel)} have no ${noun()} in common in this time frame${t.hidden ? " that reach the minimum time" : ""}. ` +
+      `${t.not_common.toLocaleString()} were played by only some of you. Untick “Only songs everyone played”, pick a wider frame, or lower the minimum.`;
+  }
+  if (t.hidden) {
+    return `No ${noun(1)} reached ${$("min").selectedOptions[0].text.toLowerCase()} in this time frame ` +
+      `(${t.hidden.toLocaleString()} shorter ones are hidden). Lower the minimum or pick a wider frame.`;
+  }
+  const range = META.first ? ` The history runs from ${niceDay(META.first)} to ${niceDay(META.last)}.` : "";
+  return `Nothing was played in this time frame.${range} Pick a wider frame or a different year.`;
+}
+
+function subtitle(r) {
+  if (r.kind === "artist") return `${r.n_tracks.toLocaleString()} ${r.n_tracks === 1 ? "song" : "songs"}`;
+  return r.sub;
+}
+
+function card(r, i, d) {
+  const sel = d.people, isJoint = sel.length > 1;
+  let badge = "";
+  if (r.move !== null && d.has_prev) {
+    if (r.new) badge = `<span class="move new" title="Not in the previous period">NEW</span>`;
+    else if (r.move > 0) badge = `<span class="move up" title="Up ${r.move} from the previous period">▲${r.move}</span>`;
+    else if (r.move < 0) badge = `<span class="move down" title="Down ${-r.move} from the previous period">▼${-r.move}</span>`;
+  }
+  let stats;
+  if (isJoint) {
+    stats = `<div class="time"><b>${jointFmt(r.joint)}</b><span>joint score</span></div>
+      <ul class="who">${sel.map((pid, j) => `<li class="${r.per[j] ? "" : "none"}" style="--c:${color(pid)}">
+        <span>${esc(pname(pid))}</span><span>${measureText(r.per[j])}</span></li>`).join("")}</ul>
+      <div class="split" title="Share of ${BY_LABEL[state.by]}">${bar(sel.map((pid, j) => [measure(r.per[j]), color(pid)]))}</div>`;
+  } else {
+    stats = `<div class="time">${decayOn()
+        ? `<b>${pts(r.score)} pts</b><span>${fmt(r.total)}</span>`
+        : `<b>${fmt(r.total)}</b><span>${r.plays.toLocaleString()} plays</span>`}</div>
+      <div class="split" title="Spotify ${fmt(r.spotify)} / Tidal ${fmt(r.tidal)}">${sourceBar(r.spotify, r.tidal)}</div>`;
+  }
+  let line = "";
+  if (state.sort === "skip_hi" || state.sort === "skip_lo") {
+    line = r.skip_n ? `Skipped ${pct(r.skips / r.skip_n)} of ${r.skip_n.toLocaleString()} Spotify plays` : "No skip data (Tidal only)";
+  } else if (state.view === "rediscover") {
+    line = `Last played ${niceDay(r.last)}`;
+  }
+  return `<li class="item">
+    <button type="button" class="cover" data-i="${i}" aria-label="Details for ${esc(r.title)}">
+      <span class="ph">${esc((r.title[0] || "?").toUpperCase())}</span>
+      <img src="/api/cover?k=${enc(r.cover_key)}" alt="" loading="lazy" referrerpolicy="no-referrer">
+      <span class="rank">${r.rank}</span>${badge}<span class="hint">${r.kind === "track" ? "Lyrics and timeline" : "Top songs and timeline"}</span>
+    </button>
+    <div class="meta">
+      <div class="title" title="${esc(r.title)}">${esc(r.title)}</div>
+      <div class="artist" title="${esc(subtitle(r))}">${esc(subtitle(r))}</div>
+      ${stats}
+      ${line ? `<div class="skipline">${esc(line)}</div>` : ""}
+    </div></li>`;
 }
 
 function renderPager(page, pages) {
@@ -305,9 +416,176 @@ function renderPager(page, pages) {
   $("pager").innerHTML = html;
 }
 
+// --------------------------------------------------------------- insights --
+let insCtrl = null;
+async function loadInsights() {
+  insCtrl?.abort();
+  const mine = insCtrl = new AbortController();
+  const body = $("insights-body");
+  body.style.opacity = ".5";
+  try {
+    const r = await fetch("/api/insights?" + new URLSearchParams(baseParams()), {signal: mine.signal});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
+    body.innerHTML = renderInsights(d);
+    body.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
+  } catch (e) {
+    if (e.name === "AbortError") return;
+    body.innerHTML = `<p class="muted">Couldn't load insights (${esc(e.message)}).</p>`;
+  } finally {
+    if (insCtrl === mine) body.style.opacity = "";
+  }
+}
+
+// "12 Mar 2025, 21:04–23:40", or with both dates when a streak runs past midnight (browser's time zone)
+function streakWhen(s) {
+  const a = new Date(s.start_ts * 1000), b = new Date(s.end_ts * 1000);
+  const day = d => d.toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
+  const time = d => d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"});
+  return a.toDateString() === b.toDateString()
+    ? `${day(a)}, ${time(a)}–${time(b)}`
+    : `${day(a)} ${time(a)} to ${day(b)} ${time(b)}`;
+}
+function renderInsights(d) {
+  const parts = [];
+  const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
+  if (d.compat?.length) {
+    parts.push(`<div><h3>How compatible are you? <span class="muted">${esc(scope)}</span></h3>
+      ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`);
+  }
+
+  const streakList = (list, kind) => list.length
+    ? `<ul class="streaks">${list.slice(0, 5).map(s => `<li><b>×${s.len}</b><span>${esc(s.title)}
+        <small>${kind === "song" ? esc(s.sub) + " · " : ""}${streakWhen(s)} · ${fmt(s.ms)}</small></span></li>`).join("")}</ul>`
+    : `<p class="muted">No ${kind} played twice in a row here.</p>`;
+  parts.push(`<div><h3>Longest streaks ${esc(scope)}</h3><div class="ins-grid">${d.streaks.map(s => `
+    <div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(s.pid)}"><b>${esc(pname(s.pid))}</b></p>` : ""}
+      <p class="muted">Same song, back to back</p>${streakList(s.songs, "song")}
+      <p class="muted">Same artist, back to back</p>${streakList(s.artists, "artist")}
+    </div>`).join("")}</div></div>`);
+
+  const days = [...Array(7)].map((_, i) => new Date(2024, 0, 1 + i).toLocaleDateString(undefined, {weekday: "short"}));
+  parts.push(`<div><h3>When you listen</h3><div class="ins-grid">${d.clock.map(c => {
+    const max = Math.max(1, ...c.ms);
+    let cells = `<span></span>` + [0, 6, 12, 18].map(h => `<span class="hl">${h}:00</span>`).join("");
+    for (let day = 0; day < 7; day++) {
+      cells += `<span>${days[day]}</span>`;
+      for (let h = 0; h < 24; h++) {
+        const v = c.ms[day * 24 + h];
+        cells += `<i style="--c:${color(c.pid)};--o:${(v / max).toFixed(3)}" title="${days[day]} ${h}:00, ${fmt(v)}"></i>`;
+      }
+    }
+    return `<div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(c.pid)}"><b>${esc(pname(c.pid))}</b></p>` : ""}
+      <div class="heat">${cells}</div></div>`;
+  }).join("")}</div></div>`);
+
+  // places: merge Spotify country codes and Tidal country names that mean the same country
+  const merged = new Map();
+  d.places.forEach(p => {
+    const name = placeName(p.place);
+    const m = merged.get(name) || {name, ms: 0, plays: 0, top: p.top, topMs: 0};
+    m.ms += p.ms; m.plays += p.plays;
+    if (p.ms > m.topMs) { m.top = p.top; m.topMs = p.ms; }
+    merged.set(name, m);
+  });
+  const places = [...merged.values()].sort((a, b) => b.ms - a.ms).slice(0, 8);
+  if (places.length) {
+    const max = places[0].ms;
+    parts.push(`<div><h3>Where you listened</h3><ul class="places">${places.map(p => `<li>
+      <span>${esc(p.name)}</span><span class="muted">${hours(p.ms)}</span>
+      <div class="bars"><i style="width:${p.ms / max * 100}%"></i></div>
+      <small>Most played there: ${esc(p.top.title)} by ${esc(p.top.sub)}</small></li>`).join("")}</ul></div>`);
+  }
+  return parts.join("");
+}
+
+// ---------------------------------------------------------- compatibility --
+const VERDICTS = [[0.6, "Musical soulmates"], [0.45, "On the same wavelength"], [0.3, "Plenty in common"],
+                  [0.18, "A solid overlap"], [0.08, "A few shared favorites"], [0, "Opposites attract"]];
+const verdict = x => VERDICTS.find(([t]) => Math.round(x * 100) / 100 >= t)[1];   // matches the shown %
+
+function compatCard(c, weights) {
+  const A = pname(c.a), B = pname(c.b), tc = c.top_counts;
+  const rows = [
+    ["songs", "Song taste", "How similarly you spread your listening across songs"],
+    ["artists", "Artist taste", "The same, per artist"],
+    ["overlap", "Common ground", "How much of your listening goes to songs you both play"],
+    ["top", "Top 20 crossover", `${B} has played ${tc.b_played_a} of ${A}’s top ${tc.a_top}; ${A} has played ${tc.a_played_b} of ${B}’s top ${tc.b_top}`],
+    ["rhythm", "Listening rhythm", "How alike your listening days and hours are"],
+  ];
+  const formula = rows.map(([k, l]) => `${Math.round(weights[k] * 100)}% ${l.toLowerCase()}`).join(" + ");
+  const extra = [];
+  if (c.anthem) extra.push(`Your shared anthem: <button type="button" class="linkish" data-open-key="${esc(c.anthem.key)}"
+    data-title="${esc(c.anthem.title)}" data-sub="${esc(c.anthem.sub)}"><b>${esc(c.anthem.title)}</b> by ${esc(c.anthem.sub)}</button>`);
+  if (c.artist) extra.push(`Most shared artist: <b>${esc(c.artist.title)}</b>`);
+  extra.push(`${c.shared_songs.toLocaleString()} songs in common`);
+  return `<div class="compat" data-overall="${c.overall}" style="--ca:${color(c.a)};--cb:${color(c.b)}">
+    <svg class="venn" viewBox="0 0 260 150" role="img" aria-label="${esc(A)} and ${esc(B)}: ${pct(c.overall)} compatible">
+      <circle class="va" cx="58" cy="70" r="52"/>
+      <circle class="vb" cx="202" cy="70" r="52"/>
+      <circle class="spark" cx="130" cy="70" r="6"/>
+      <text class="la" x="124" y="142" text-anchor="end">${esc(A)}</text>
+      <text class="lb" x="136" y="142" text-anchor="start">${esc(B)}</text>
+    </svg>
+    <div class="compat-main">
+      <p class="compat-score"><span class="num">0</span><span class="unit">%</span></p>
+      <p class="compat-verdict">${esc(verdict(c.overall))}</p>
+      <button type="button" class="ghost replay">Play again</button>
+    </div>
+    <ul class="compat-metrics">${rows.map(([k, label, help]) => `<li title="${esc(help)}">
+      <span>${esc(label)}</span><span class="track"><i data-v="${c.metrics[k]}"></i></span><b>${pct(c.metrics[k])}</b>
+      <small>${esc(help)}</small></li>`).join("")}</ul>
+    <p class="compat-extra">${extra.join(" · ")}</p>
+    <p class="compat-formula muted">Overall = ${esc(formula)}. Based on ${BY_LABEL[state.by]} ${esc(frameLabel())}.</p>
+  </div>`;
+}
+
+const ease = t => 1 - Math.pow(1 - t, 3);
+function animateCompat(card) {
+  const s = +card.dataset.overall;
+  const va = card.querySelector(".va"), vb = card.querySelector(".vb"), spark = card.querySelector(".spark");
+  const la = card.querySelector(".la"), lb = card.querySelector(".lb");
+  const num = card.querySelector(".num");
+  const bars = [...card.querySelectorAll(".compat-metrics i")];
+  // final distance between centres: touching at 0%, on top of each other at 100%
+  const r = 52, d = 2 * r * (1 - Math.min(s, 1)) + 4;
+  const from = [58, 202], to = [130 - d / 2, 130 + d / 2];
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  card.classList.remove("done");
+  cancelAnimationFrame(card._raf);
+  bars.forEach(b => { b.style.transition = "none"; b.style.width = "0"; });
+  void card.offsetWidth;                                   // restart CSS transitions
+
+  const finish = () => {
+    card.classList.add("done");
+    bars.forEach((b, i) => {
+      b.style.transition = reduce ? "none" : `width .7s cubic-bezier(.2,.8,.2,1) ${i * 0.12}s`;
+      b.style.width = (Math.min(+b.dataset.v, 1) * 100) + "%";
+    });
+  };
+  const place = p => {
+    const xa = from[0] + (to[0] - from[0]) * p, xb = from[1] + (to[1] - from[1]) * p;
+    va.setAttribute("cx", xa); la.setAttribute("x", Math.min(xa, 124));   // names sit side by side, never overlap
+    vb.setAttribute("cx", xb); lb.setAttribute("x", Math.max(xb, 136));
+    spark.setAttribute("cx", (xa + xb) / 2);
+    num.textContent = Math.round(s * 100 * p);
+  };
+  if (reduce) { place(1); finish(); return; }
+  const t0 = performance.now(), dur = 1600;
+  const step = now => {
+    const p = ease(Math.min((now - t0) / dur, 1));
+    place(p);
+    if (p < 1) card._raf = requestAnimationFrame(step);
+    else finish();
+  };
+  place(0);
+  card._raf = requestAnimationFrame(step);
+}
+
 // ------------------------------------------------------------- URL state --
 function writeHash() {
-  const h = {f: state.frame, q: state.q, s: state.sort, m: state.min, d: state.decay, n: state.size, p: state.page};
+  const h = {f: state.frame, q: state.q, s: state.sort, m: state.min, d: state.decay, n: state.size, p: state.page,
+             lv: state.level, v: state.view, g: state.gap, mp: state.minplay ? 1 : 0};
   if (state.frame === "custom") Object.assign(h, {from: state.from, to: state.to});
   if (META.people.length > 1) {
     Object.assign(h, {ppl: state.people.join(","), w: state.people.map(weight).join(","),
@@ -327,6 +605,10 @@ function readHash() {
   if (DECAY[+h.get("d")]) state.decay = +h.get("d");
   if (+h.get("n")) state.size = +h.get("n");
   if (+h.get("p")) state.page = +h.get("p");
+  if (LEVELS[h.get("lv")]) state.level = h.get("lv");
+  if (h.get("v")) state.view = h.get("v");
+  if (GAPS[+h.get("g")]) state.gap = +h.get("g");
+  if (h.has("mp")) state.minplay = h.get("mp") !== "0";
 
   const n = META.people.length;
   const ppl = (h.get("ppl") || "").split(",").filter(x => x !== "").map(Number)
@@ -341,60 +623,169 @@ function readHash() {
   if (!h.get("s")) state.sort = defaultSort();
 }
 
-// ----------------------------------------------------------------- lyrics --
+// ----------------------------------------------------------------- detail --
 const lyricCache = new Map();
-let current = null;
+let current = null, dlgStack = [];
 
-async function openLyrics(r) {
-  current = r;
-  const sel = lastData?.people || [];
+async function openDetail(item, fromStack = false) {
+  if (!fromStack) dlgStack = [];
+  current = item;
   const img = $("dlg-img");
-  img.style.visibility = "hidden";
-  img.onload = () => { img.style.visibility = "visible"; };
-  img.src = "/api/cover?k=" + enc(r.key);
-  $("dlg-title").textContent = r.title;
-  $("dlg-sub").textContent = r.artist + (r.album ? " — " + r.album : "");
-  const who = sel.length > 1
-    ? `<span>Joint score ${jointFmt(r.joint)}</span>` + sel.map((pid, j) => {
-        const p = r.per[j];
-        return `<span>${esc(pname(pid))}: ${p ? `${p.plays.toLocaleString()} plays, ${fmt(p.ms)}${decayOn() ? `, ${pts(p.score)} pts` : ""}` : "not played"}</span>`;
-      }).join("")
-    : (decayOn() ? `<span>Score ${pts(r.score)}</span>` : "") +
-      `<span>Spotify ${fmt(r.spotify)}</span><span>Tidal ${fmt(r.tidal)}</span>`;
-  $("dlg-foot").innerHTML = who +
-    (r.first ? `<span>${r.first === r.last ? "Played " + niceDay(r.first) : niceDay(r.first) + " to " + niceDay(r.last)}</span>` : "") +
-    (r.spotify_url ? `<a href="${esc(r.spotify_url)}" target="_blank" rel="noopener">Open in Spotify</a>` : "") +
-    `<a href="https://genius.com/search?q=${enc(r.artist + " " + r.title)}" target="_blank" rel="noopener">Search on Genius</a>`;
+  img.style.display = "none";
+  img.onload = () => { img.style.display = ""; };
+  img.onerror = () => { img.style.display = "none"; };
+  img.src = "/api/cover?k=" + enc(item.cover_key || item.key);
+  $("dlg-title").textContent = item.title;
+  $("dlg-sub").textContent = item.kind === "artist" ? "Artist" : item.sub + (item.album ? " — " + item.album : "");
+  const back = dlgStack.length ? `<section><button type="button" class="dlg-back" id="dlg-back">← Back to ${esc(dlgStack[dlgStack.length - 1].title)}</button></section>` : "";
+  $("dlg-body").innerHTML = back + `<section><p class="muted">Loading…</p></section>`;
+  if (!$("dlg").open) $("dlg").showModal();
+  $("dlg-body").scrollTop = 0;
 
-  const box = $("dlg-lyrics");
-  box.className = "lyrics status";
-  box.textContent = "Loading lyrics…";
-  $("dlg").showModal();
+  let d;
   try {
-    let text = lyricCache.get(r.key);
+    const r = await fetch("/api/detail?" + new URLSearchParams({...baseParams(), k: item.key}));
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
+  } catch (e) {
+    if (current !== item) return;
+    $("dlg-body").innerHTML = back + `<section><p class="muted">Couldn't load details (${esc(e.message)}).</p></section>`;
+    return;
+  }
+  if (current !== item) return;
+  if (d.album) $("dlg-sub").textContent = d.sub + " — " + d.album;
+
+  const sections = [back];
+  if (d.spotify_url) {
+    const id = d.spotify_url.split("/").pop();
+    sections.push(`<section class="embed"><iframe src="https://open.spotify.com/embed/track/${esc(id)}?utm_source=generator"
+      allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy" title="Spotify player"></iframe></section>`);
+  }
+
+  const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
+  const statLine = p => `${p.plays.toLocaleString()} plays · ${fmt(p.ms)}` +
+    (p.skip_n ? ` · skipped ${pct(p.skips / p.skip_n)}` : "") +
+    (p.first ? ` · ${p.first === p.last ? niceDay(p.first) : niceDay(p.first) + " to " + niceDay(p.last)}` : "");
+  const links = (d.spotify_url ? `<a href="${esc(d.spotify_url)}" target="_blank" rel="noopener">Open in Spotify</a>` : "") +
+    (d.kind === "track" ? `<a href="https://genius.com/search?q=${enc(d.sub + " " + d.title)}" target="_blank" rel="noopener">Search on Genius</a>` : "");
+  sections.push(`<section><h3>${esc(scope[0].toUpperCase() + scope.slice(1))}</h3><div class="stats">${
+    d.per.map(p => `<span>${META.people.length > 1 ? `<b class="who-h" style="--c:${color(p.pid)}">${esc(pname(p.pid))}</b>: ` : ""}${p.plays ? statLine(p) : "not played"}</span>`).join("")
+  }${links}</div></section>`);
+
+  if (d.buckets.length > 1) sections.push(`<section class="timeline"><h3>Over time</h3>${timelineSVG(d)}</section>`);
+
+  if (d.kind === "track") {
+    sections.push(`<section><h3>Lyrics</h3><div class="lyrics status" id="dlg-lyrics">Loading lyrics…</div></section>`);
+  } else if (d.top.length) {
+    sections.push(`<section><h3>Top songs</h3><ol class="toplist">${d.top.map((t, i) => `<li>
+      <button type="button" data-top="${i}"><span class="muted">${i + 1}</span><span>${esc(t.title)}${d.kind === "album" ? "" : ""}</span>
+      <span>${fmt(t.ms)} · ${t.plays.toLocaleString()} plays</span></button></li>`).join("")}</ol></section>`);
+  }
+  $("dlg-body").innerHTML = sections.join("");
+  $("dlg-body").querySelectorAll("[data-top]").forEach(b => b.addEventListener("click", () => {
+    const t = d.top[+b.dataset.top];
+    dlgStack.push(item);
+    openDetail({key: t.key, cover_key: t.key, kind: "track", title: t.title, sub: t.sub}, true);
+  }));
+  $("dlg-back")?.addEventListener("click", () => openDetail(dlgStack.pop(), true));
+
+  if (d.kind === "track") loadLyrics(item);
+}
+
+async function loadLyrics(item) {
+  const box = () => $("dlg-lyrics");
+  try {
+    let text = lyricCache.get(item.key);
     if (text === undefined) {
-      const res = await fetch("/api/lyrics?k=" + enc(r.key));
+      const res = await fetch("/api/lyrics?k=" + enc(item.key));
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || "HTTP " + res.status);
       text = d.text;
-      lyricCache.set(r.key, text);
+      lyricCache.set(item.key, text);
     }
-    if (current !== r) return;
-    box.className = text ? "lyrics" : "lyrics status";
-    box.textContent = text || "No lyrics found on lrclib.net for this track. The Genius link below may have them.";
+    if (current !== item || !box()) return;
+    box().className = text ? "lyrics" : "lyrics status";
+    box().textContent = text || "No lyrics found on lrclib.net for this song. The Genius link above may have them.";
   } catch (e) {
-    if (current !== r) return;
-    box.textContent = `Couldn't load lyrics (${e.message}). Close this and click the cover again to retry.`;
+    if (current !== item || !box()) return;
+    box().textContent = `Couldn't load lyrics (${e.message}). Close this and open it again to retry.`;
   }
-  box.scrollTop = 0;
+}
+
+function timelineSVG(d) {
+  const W = 620, H = 150, L = 36, B = 22, T = 10, R = 6;
+  const useMs = state.by !== "plays";
+  const series = d.series.map(s => ({pid: s.pid, v: useMs ? s.ms.map(x => x / 60000) : s.plays}));
+  const n = d.buckets.length;
+  const max = Math.max(1, ...series.flatMap(s => s.v));
+  const x = i => L + (n === 1 ? (W - L - R) / 2 : i * (W - L - R) / (n - 1));
+  const y = v => T + (H - T - B) * (1 - v / max);
+  const label = s => {
+    const dt = new Date(s + "T00:00");
+    return d.unit === "month" ? dt.toLocaleDateString(undefined, {month: "short", year: "numeric"})
+                              : dt.toLocaleDateString(undefined, {day: "numeric", month: "short"});
+  };
+  const unitWord = useMs ? "min" : "plays";
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(unitWord)} per ${d.unit} over time">
+    <line x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line)"/>
+    <line x1="${L}" x2="${W - R}" y1="${y(max)}" y2="${y(max)}" stroke="var(--line)" stroke-dasharray="3 4"/>
+    <text x="${L - 6}" y="${y(max) + 4}" text-anchor="end">${Math.round(max).toLocaleString()}</text>
+    <text x="${L - 6}" y="${y(0) + 4}" text-anchor="end">0</text>`;
+  if (series.length === 1) {
+    const bw = Math.max(1, (W - L - R) / n * 0.75);
+    series[0].v.forEach((v, i) => {
+      if (!v) return;
+      const cx = n === 1 ? x(i) : L + (i + 0.5) * (W - L - R) / n;
+      svg += `<rect x="${cx - bw / 2}" y="${y(v)}" width="${bw}" height="${y(0) - y(v)}" rx="1.5" fill="${color(series[0].pid)}">
+        <title>${label(d.buckets[i])}: ${Math.round(v).toLocaleString()} ${unitWord}</title></rect>`;
+    });
+  } else {
+    series.forEach(s => {
+      svg += `<polyline fill="none" stroke="${color(s.pid)}" stroke-width="2" stroke-linejoin="round"
+        points="${s.v.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ")}"/>`;
+    });
+  }
+  const ticks = n <= 2 ? [0, n - 1] : [0, Math.floor((n - 1) / 2), n - 1];
+  [...new Set(ticks)].forEach((i, k, arr) => {
+    const anchor = k === 0 ? "start" : k === arr.length - 1 ? "end" : "middle";
+    svg += `<text x="${x(i)}" y="${H - 4}" text-anchor="${anchor}">${esc(label(d.buckets[i]))}</text>`;
+  });
+  return svg + `</svg>`;
+}
+
+// --------------------------------------------------------------- playlist --
+async function copyPlaylist() {
+  const btn = $("copy");
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/tracks?" + listParams({page: 1, size: 50, q: ""}));
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
+    const urls = d.items.map(i => i.spotify_url).filter(Boolean);
+    const missing = d.items.length - urls.length;
+    if (!urls.length) { toast("None of these songs have a Spotify link (they were only played on Tidal)."); return; }
+    const text = urls.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = Object.assign(document.createElement("textarea"), {value: text});
+      document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    }
+    toast(`Copied ${urls.length} songs. In the Spotify desktop app, open a playlist and press Ctrl+V (⌘V on a Mac).` +
+          (missing ? ` ${missing} songs played only on Tidal were left out.` : ""));
+  } catch (e) {
+    toast(`Couldn't copy the playlist (${e.message}).`);
+  } finally {
+    btn.disabled = state.level !== "track";
+  }
 }
 
 // ----------------------------------------------------------------- events --
-const reload = () => { state.page = 1; load(); };
+const reload = () => { state.page = 1; refresh(); };
 let timer;
 const reloadSoon = () => { clearTimeout(timer); timer = setTimeout(reload, 200); };
 
-document.querySelectorAll(".frames button").forEach(b =>
+document.querySelectorAll("#frames button").forEach(b =>
   b.addEventListener("click", () => setFrame(b.dataset.frame)));
 $("year").addEventListener("change", e => e.target.value ? setFrame("y" + e.target.value) : setFrame("all"));
 ["from", "to"].forEach(id => $(id).addEventListener("change", () => setFrame("custom", $("from").value, $("to").value)));
@@ -406,7 +797,6 @@ $("people").addEventListener("click", e => {
   state.people = state.people.includes(pid)
     ? state.people.filter(x => x !== pid)
     : [...state.people, pid].sort((a, b) => a - b);
-  // switching between solo and joint resets a default sort to the new default
   if (wasJoint !== joint() && (defaultBefore || ["total", "score", "joint"].includes(state.sort))) state.sort = defaultSort();
   syncUI();
   reload();
@@ -422,7 +812,7 @@ $("weights").addEventListener("input", e => {
   state.weights[pid] = +e.target.value;
   e.target.nextElementSibling.textContent = state.weights[pid].toFixed(1);
   syncFormula();
-  reloadSoon();
+  clearTimeout(timer); timer = setTimeout(() => { state.page = 1; load(); }, 200);
 });
 
 $("decay").addEventListener("input", e => {
@@ -440,11 +830,32 @@ $("decay").addEventListener("input", e => {
   if (joint()) syncFormula();
   reloadSoon();
 });
+$("minplay").addEventListener("change", e => { state.minplay = e.target.checked; reload(); });
 
-$("q").addEventListener("input", e => { state.q = e.target.value; clearTimeout(timer); timer = setTimeout(reload, 200); });
-$("sort").addEventListener("change", e => { state.sort = e.target.value; reload(); });
-$("min").addEventListener("change", e => { state.min = +e.target.value; reload(); });
-$("size").addEventListener("change", e => { state.size = +e.target.value; reload(); });
+$("level").addEventListener("click", e => {
+  const b = e.target.closest("button[data-level]");
+  if (!b || b.dataset.level === state.level) return;
+  state.level = b.dataset.level;
+  state.q = "";
+  syncUI();
+  reload();
+});
+$("view").addEventListener("change", e => { state.view = e.target.value; syncUI(); reload(); });
+$("gap").addEventListener("change", e => { state.gap = +e.target.value; syncUI(); reload(); });
+$("copy").addEventListener("click", copyPlaylist);
+$("insights").addEventListener("toggle", () => { if ($("insights").open) loadInsights(); });
+$("insights-body").addEventListener("click", e => {
+  const replay = e.target.closest(".replay");
+  if (replay) return animateCompat(replay.closest(".compat"));
+  const open = e.target.closest("[data-open-key]");
+  if (open) openDetail({key: open.dataset.openKey, cover_key: open.dataset.openKey, kind: "track",
+                        title: open.dataset.title, sub: open.dataset.sub});
+});
+
+$("q").addEventListener("input", e => { state.q = e.target.value; clearTimeout(timer); timer = setTimeout(() => { state.page = 1; load(); }, 200); });
+$("sort").addEventListener("change", e => { state.sort = e.target.value; state.page = 1; load(); });
+$("min").addEventListener("change", e => { state.min = +e.target.value; state.page = 1; load(); });
+$("size").addEventListener("change", e => { state.size = +e.target.value; state.page = 1; load(); });
 $("pager").addEventListener("click", e => {
   const b = e.target.closest("button[data-p]");
   if (!b || b.disabled) return;
@@ -454,12 +865,13 @@ $("pager").addEventListener("click", e => {
 });
 $("grid").addEventListener("click", e => {
   const b = e.target.closest(".cover");
-  if (b) openLyrics(items[+b.dataset.i]);
+  if (b) openDetail(items[+b.dataset.i]);
 });
 // covers that can't be found: drop the <img> so the letter placeholder shows
 $("grid").addEventListener("error", e => { if (e.target.tagName === "IMG") e.target.remove(); }, true);
 $("dlg-close").addEventListener("click", () => $("dlg").close());
 $("dlg").addEventListener("click", e => { if (e.target === $("dlg")) $("dlg").close(); });
+$("dlg").addEventListener("close", () => { current = null; $("dlg-body").innerHTML = ""; });   // stops the player
 
 // ------------------------------------------------------------------- init --
 (async () => {
@@ -468,7 +880,7 @@ $("dlg").addEventListener("click", e => { if (e.target === $("dlg")) $("dlg").cl
     $("year").insertAdjacentHTML("beforeend",
       META.years.slice().reverse().map(y => `<option value="${y}">${y}</option>`).join(""));
     if (META.first) { $("from").min = $("to").min = META.first; $("from").max = $("to").max = META.last; }
-  } catch { /* the tracks request below will show the error */ }
+  } catch { /* the list request below will show the error */ }
   readHash();
   syncUI();
   load();

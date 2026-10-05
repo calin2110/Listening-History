@@ -16,7 +16,7 @@
 
     <div class="people" id="people" role="group" aria-label="Whose listening to include" hidden></div>
 
-    <div class="frames" role="group" aria-label="Time frame">
+    <div class="frames" id="frames" role="group" aria-label="Time frame">
       <button type="button" data-frame="1m">Last month</button>
       <button type="button" data-frame="3m">3 months</button>
       <button type="button" data-frame="6m">6 months</button>
@@ -31,11 +31,13 @@
         <input type="date" id="to" aria-label="To date">
       </span>
     </div>
+    <p class="frame-note" id="frame-note" hidden></p>
 
     <div class="decay">
       <label for="decay">Decay</label>
       <input type="range" id="decay" min="0" max="8" step="1" value="0" aria-describedby="decay-note">
       <output id="decay-val" for="decay">Off</output>
+      <label class="check"><input type="checkbox" id="minplay" checked> Ignore plays under 30 seconds</label>
       <span class="note" id="decay-note"></span>
     </div>
 
@@ -60,31 +62,48 @@
       </div>
       <div class="weights" id="weights"></div>
       <p class="formula" id="formula-text"></p>
+      <p class="match" id="match" hidden></p>
     </section>
 
     <div class="totals" id="totals" aria-live="polite"></div>
     <div class="split big" id="bigsplit"></div>
   </header>
 
+  <details class="insights" id="insights">
+    <summary>Insights <span>streaks, taste match, when and where you listen</span></summary>
+    <div id="insights-body" class="insights-body"><p class="muted">Loading…</p></div>
+  </details>
+
+  <div class="viewbar">
+    <div class="tabs" id="level" role="tablist" aria-label="Group by">
+      <button type="button" role="tab" data-level="track">Songs</button>
+      <button type="button" role="tab" data-level="artist">Artists</button>
+      <button type="button" role="tab" data-level="album">Albums</button>
+    </div>
+    <label>Show
+      <select id="view" aria-label="What to show"></select>
+    </label>
+    <label id="gap-wrap" hidden>not played for
+      <select id="gap">
+        <option value="91">3 months</option>
+        <option value="182">6 months</option>
+        <option value="365" selected>a year</option>
+        <option value="730">2 years</option>
+      </select>
+    </label>
+    <button type="button" class="ghost" id="copy">Copy top 50 as playlist</button>
+  </div>
+
   <div class="controls">
-    <input id="q" type="search" placeholder="Search artist, track or album" aria-label="Search">
-    <select id="sort" aria-label="Sort by">
-      <option value="score">Top score (with decay)</option>
-      <option value="total">Most played (both)</option>
-      <option value="spotify">Most played on Spotify</option>
-      <option value="tidal">Most played on Tidal</option>
-      <option value="plays">Most plays</option>
-      <option value="last">Recently played</option>
-      <option value="artist">Artist A–Z</option>
-      <option value="title">Track A–Z</option>
-    </select>
+    <input id="q" type="search" placeholder="Search" aria-label="Search">
+    <select id="sort" aria-label="Sort by"></select>
     <select id="min" aria-label="Minimum listening time">
       <option value="0">Any length</option>
       <option value="5">At least 5 min</option>
       <option value="20" selected>At least 20 min</option>
       <option value="60">At least 1 hour</option>
     </select>
-    <select id="size" aria-label="Tracks per page">
+    <select id="size" aria-label="Items per page">
       <option>24</option><option selected>48</option><option>96</option><option>192</option>
     </select>
     <span class="count" id="count"></span>
@@ -100,9 +119,10 @@
     <div><h2 id="dlg-title"></h2><p id="dlg-sub"></p></div>
     <button type="button" class="close" id="dlg-close" aria-label="Close">×</button>
   </div>
-  <div class="lyrics" id="dlg-lyrics"></div>
-  <div class="dlg-foot" id="dlg-foot"></div>
+  <div class="dlg-body" id="dlg-body"></div>
 </dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 </body>
