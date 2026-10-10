@@ -37,17 +37,123 @@ function renderFunSections(f) {
   return [personality, eras];
 }
 
+// Eras as a grid, like a contribution graph: one square per period with the cover of
+// that period's top song. Brighter = more listening; hover for the album and song.
+const eraTips = [];
+const DAY_MS = 86400000;
+const PERIODS = {   // squares per year row, months per square, column labels, square size range (px)
+  month: [12, 1, m => new Date(2024, m, 1).toLocaleDateString(undefined, {month: "short"}), 16, 46],
+  quarter: [4, 3, null, 36, 84],
+  half: [2, 6, null, 56, 120],
+};
+const pad2 = n => String(n).padStart(2, "0");
+
+function eraCell(e, maxMs, unit, small) {
+  if (!e) return `<span class="ec silent" aria-hidden="true"></span>`;   // not "empty": that class is taken
+  eraTips.push({e, unit});
+  const o = (0.38 + 0.62 * Math.sqrt(e.ms / maxMs)).toFixed(2);
+  return `<button type="button" class="ec" style="--o:${o}" data-tip="${eraTips.length - 1}" data-open-key="${esc(e.key)}"
+    data-title="${esc(e.title)}" data-sub="${esc(e.sub)}" aria-label="${esc(eraLabel(e.start, unit))}: ${esc(e.title)} by ${esc(e.sub)}">
+    <img src="/api/cover?k=${enc(e.cover_key)}${small ? "&s=small" : ""}" alt="" loading="lazy" referrerpolicy="no-referrer"
+      onerror="this.remove()"></button>`;
+}
+
+function dayGrid(eras, lo, hi) {
+  const byDate = new Map(eras.map(e => [e.start, e]));
+  const maxMs = Math.max(...eras.map(e => e.ms));
+  const years = [...new Set(eras.map(e => +e.start.slice(0, 4)))].sort((a, b) => b - a);
+  const blocks = years.map(y => {
+    const jan1 = new Date(y, 0, 1), start = new Date(y, 0, 1 - (jan1.getDay() + 6) % 7);   // Monday on or before 1 Jan
+    const weeks = Math.ceil((Math.round((new Date(y, 11, 31) - start) / DAY_MS) + 1) / 7);
+    let cells = "";
+    for (let i = 0; i < weeks * 7; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i), k = isoDay(d);
+      cells += d.getFullYear() !== y || k < lo || k > hi ? `<span class="ec out"></span>` : eraCell(byDate.get(k), maxMs, "day", true);
+    }
+    const months = [...Array(12)].map((_, m) => {
+      const col = Math.floor(Math.round((new Date(y, m, 1) - start) / DAY_MS) / 7) + 1;
+      return `<span style="grid-column:${col} / span 4">${new Date(y, m, 1).toLocaleDateString(undefined, {month: "short"})}</span>`;
+    }).join("");
+    const days = [...Array(7)].map((_, i) => i % 2 ? "" : new Date(2024, 0, 1 + i).toLocaleDateString(undefined, {weekday: "short"}));
+    const n = eras.filter(e => e.start.startsWith(y + "-")).length;
+    return `<div class="eg-year"><p class="eg-ylabel">${y} <span class="muted">${plural(n, "day")} with music</span></p>
+      <div class="eg-scroll"><div class="eg-day" style="--weeks:${weeks}">
+        <div class="eg-months">${months}</div>
+        <div class="eg-wd">${days.map(d => `<span>${esc(d)}</span>`).join("")}</div>
+        <div class="eg-cells">${cells}</div></div></div></div>`;
+  });
+  const shown = 2;
+  return blocks.slice(0, shown).join("") + (blocks.length > shown
+    ? `<details class="eg-more"><summary>Show ${plural(blocks.length - shown, "older year")}</summary>${blocks.slice(shown).join("")}</details>` : "");
+}
+
+function periodGrid(eras, unit, lo, hi) {
+  const [n, size, label, min, max] = PERIODS[unit];
+  const byStart = new Map(eras.map(e => [e.start, e]));
+  const maxMs = Math.max(...eras.map(e => e.ms));
+  const years = [...new Set(eras.map(e => +e.start.slice(0, 4)))].sort((a, b) => b - a);
+  const mon = m => new Date(2024, m, 1).toLocaleDateString(undefined, {month: "short"});
+  const heads = [...Array(n)].map((_, i) => label ? label(i) : `${mon(i * size)}–${mon(i * size + size - 1)}`);
+  let html = `<span></span>${heads.map(h => `<span class="eg-head">${esc(h)}</span>`).join("")}`;
+  for (const y of years) {
+    html += `<span class="eg-rowlabel">${y}</span>`;
+    for (let i = 0; i < n; i++) {
+      const k = `${y}-${pad2(i * size + 1)}-01`;
+      const next = i + 1 < n ? `${y}-${pad2((i + 1) * size + 1)}-01` : `${y + 1}-01-01`;
+      html += next <= lo || k > hi ? `<span class="ec out"></span>` : eraCell(byStart.get(k), maxMs, unit, unit === "month");
+    }
+  }
+  return `<div class="eg-scroll"><div class="eg-table" style="--n:${n};--min:${min}px;--max:${max}px">${html}</div></div>`;
+}
+
+function yearGrid(eras) {
+  const maxMs = Math.max(...eras.map(e => e.ms));
+  return `<div class="eg-years">${eras.map(e => `<div>${eraCell(e, maxMs, "year", false)}
+    <span class="eg-head">${esc(e.start.slice(0, 4))}</span></div>`).join("")}</div>`;
+}
+
 function renderEraRows(f) {
+  eraTips.length = 0;
   const many = META.people.length > 1;
   const rows = f.people.filter(p => p.eras.length);
   if (!rows.length) return `<p class="muted">Nothing played in this time frame.</p>`;
-  return rows.map(p => `
-    ${many ? `<p class="who-h" style="--c:${color(p.pid)}"><b>${esc(pname(p.pid))}</b>
-      <span class="muted">${p.eras.length.toLocaleString()}</span></p>` : ""}
-    <ol class="eras">${p.eras.map(e => `<li><button type="button" data-open-key="${esc(e.key)}"
-      data-title="${esc(e.title)}" data-sub="${esc(e.sub)}" title="${esc(e.title)} by ${esc(e.sub)}, ${fmt(e.ms)}">
-      ${cover(e.cover_key)}<span class="m">${esc(eraLabel(e.start, f.era))}</span><span class="t">${esc(e.title)}</span></button></li>`).join("")}</ol>`).join("");
+  const redisc = state.view === "rediscover";
+  const words = {day: "day", month: "month", quarter: "quarter", half: "half-year", year: "year"};
+  return rows.map(p => {
+    const lo = (!redisc && state.from) || p.eras[0].start;
+    const hi = (!redisc && state.to) || p.eras[p.eras.length - 1].start;
+    const grid = f.era === "day" ? dayGrid(p.eras, lo, hi)
+      : f.era === "year" ? yearGrid(p.eras) : periodGrid(p.eras, f.era, lo, hi);
+    return `<div class="eg">${many ? `<p class="who-h" style="--c:${color(p.pid)}"><b>${esc(pname(p.pid))}</b>
+      <span class="muted">${plural(p.eras.length, words[f.era])}</span></p>` : ""}${grid}</div>`;
+  }).join("") + `<p class="muted eg-note">Each square shows the cover of that ${words[f.era]}’s top song; brighter means more listening.</p>`;
 }
+
+// one floating tooltip for all squares
+const eraTip = Object.assign(document.createElement("div"), {className: "era-tip", role: "tooltip"});
+document.body.appendChild(eraTip);
+function showEraTip(el) {
+  const t = eraTips[+el.dataset.tip];
+  if (!t) return;
+  const e = t.e;
+  eraTip.innerHTML = `<b>${esc(e.album || e.title)}</b><span>${esc(e.title)} · ${esc(e.sub)}</span>
+    <small>${esc(eraLabel(e.start, t.unit))} · top song, ${fmt(e.ms)}</small>`;
+  eraTip.classList.add("show");
+  const r = el.getBoundingClientRect(), w = eraTip.offsetWidth, h = eraTip.offsetHeight;
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - w / 2), innerWidth - w - 8);
+  const top = r.top - h - 10 >= 8 ? r.top - h - 10 : r.bottom + 10;
+  eraTip.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+}
+const hideEraTip = () => eraTip.classList.remove("show");
+document.addEventListener("pointerover", e => {
+  const el = e.target.closest?.(".ec[data-tip]");
+  el ? showEraTip(el) : hideEraTip();
+});
+document.addEventListener("focusin", e => {
+  const el = e.target.closest?.(".ec[data-tip]");
+  el ? showEraTip(el) : hideEraTip();
+});
+document.addEventListener("scroll", hideEraTip, true);
 
 let eraCtrl = null;
 document.addEventListener("change", async e => {
@@ -110,7 +216,7 @@ async function getJSON(url) {
 async function personSlides(pid) {
   const p0 = funParams();
   p0.set("people", pid);
-  const f = await getJSON("/api/fun?" + p0);
+  const [f, tt] = await Promise.all([getJSON("/api/fun?" + p0), getJSON("/api/time?" + p0).catch(() => null)]);
   const p = f.people[0], name = pname(pid), c = color(pid);
   const you = META.people.length > 1 ? name : "You";
   const when = state.view === "rediscover" ? "of all time" : frameLabel();
@@ -144,6 +250,13 @@ async function personSlides(pid) {
     slides.push({bg: c, html: `<div class="slide-center"><p class="eyebrow">On repeat</p>
       ${s ? `<p class="huge">×${s.len}</p><p>${esc(s.title)} by ${esc(s.sub)}, back to back. That’s ${esc(you === "You" ? "your" : name + "’s")} longest streak.</p>` : ""}
       ${r && r.plays > 1 ? `<p>And on ${esc(niceDay(r.date))}, ${esc(r.title)} played ${r.plays} times in one day.</p>` : ""}</div>`});
+  }
+  const back = tt?.people?.[0]?.comebacks?.[0];
+  if (back && back.gap_days >= 90) {
+    slides.push({bg: c, html: `<div class="slide-split">${cover(back.cover_key, "art")}<div><p class="eyebrow">The comeback</p>
+      <p class="huge">${esc(fmtDays(back.gap_days))}</p>
+      <p>That’s how long ${esc(back.title)} by ${esc(back.sub)} went unplayed after ${esc(niceDay(back.left))}.
+        Then on ${esc(niceDay(back.back))}, it was back.</p></div></div>`});
   }
   if (p.badges.length) {
     slides.push({bg: c, html: `<div class="slide-list"><p class="eyebrow">${esc(you === "You" ? "Your" : name + "’s")} listening personality</p>
@@ -408,4 +521,99 @@ $("game-stage").addEventListener("click", e => {
     if (game.mode === "hilo") { game.a = game.b; game.b = pick(); renderHilo(); }
     else { game.round++; game.a = pick(); renderWho(); }
   }
+});
+
+// ------------------------------------------------------------ time travel --
+const TT_TABS = [["comebacks", "Comebacks"], ["steady", "Ever-present"], ["flings", "Flings"],
+                 ["slow", "Slow burners"], ["otd", "On this day"], ["found", "Found it first"]];
+let ttTab = "comebacks", ttData = null;
+const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
+function fmtMonths(m) {
+  const y = Math.floor(m / 12), r = m % 12;
+  return y ? plural(y, "year") + (r ? " " + plural(r, "month") : "") : plural(r, "month");
+}
+function fmtDays(d) {
+  if (d >= 60) return fmtMonths(Math.round(d / 30.44));
+  return plural(d, "day");
+}
+const monthLabel = m => new Date(m + "-01T00:00").toLocaleDateString(undefined, {month: "short", year: "numeric"});
+
+function renderTimeTravel(t) {
+  if (!t?.people?.length) return "";
+  ttData = t;
+  const tabs = TT_TABS.filter(([k]) => k !== "found" || t.found.length);
+  if (!tabs.some(([k]) => k === ttTab)) ttTab = "comebacks";
+  return `<div><h3>Time travel <span class="muted">how songs move through your years</span></h3>
+    <div class="tabs tt-tabs" role="tablist" aria-label="Time travel">${tabs.map(([k, l]) =>
+      `<button type="button" role="tab" data-tt="${k}" aria-selected="${k === ttTab}">${l}</button>`).join("")}</div>
+    <div id="tt-body">${ttBody()}</div></div>`;
+}
+
+const TT_INTRO = {
+  comebacks: "Songs you played, left alone for a long time, then came back to.",
+  steady: "Songs that kept coming back, month after month.",
+  flings: "Intense, short obsessions: most plays within 30 days, then nothing for at least 6 months.",
+  slow: "Songs that took a while: their busiest month came long after you first heard them.",
+};
+
+function ttRow(s, stat, detail) {
+  return `<li><button type="button" data-open-key="${esc(s.key)}" data-title="${esc(s.title)}" data-sub="${esc(s.sub)}">
+    ${cover(s.cover_key)}<span><b>${esc(s.title)}</b> <span class="muted">${esc(s.sub)}</span>
+    <strong>${stat}</strong><small>${detail}</small></span></button></li>`;
+}
+
+function ttBody() {
+  const t = ttData, many = META.people.length > 1;
+  const who = pid => many ? `<p class="who-h" style="--c:${color(pid)}"><b>${esc(pname(pid))}</b></p>` : "";
+  const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
+  if (ttTab === "found") {
+    return t.found.map(f => {
+      const A = pname(f.a), B = pname(f.b), wa = f.wins[f.a] || 0, wb = f.wins[f.b] || 0;
+      const lead = wa === wb ? "It’s a tie" : `${esc(wa > wb ? A : B)} is the trendsetter`;
+      return `<p class="tt-summary">${lead}: of the songs you both play, ${esc(A)} found ${plural(wa, "song")} first and
+        ${esc(B)} found ${plural(wb, "song")} first${f.wins.tie ? ` (${f.wins.tie} on the same day)` : ""}.</p>
+        <p class="muted tt-intro">Counted from ${esc(niceDay(f.since))}, once both histories had started, so neither of you
+        gets credit for songs the other knew before their data begins.</p>
+        ${f.songs.length ? `<ol class="tt-list">${f.songs.map(s => ttRow(s,
+          `${esc(pname(s.first))}, ${fmtDays(s.lead_days)} earlier`,
+          `First played ${esc(niceDay(s.found))}; ${esc(pname(s.second))} followed on ${esc(niceDay(s.followed))} ·
+           ${esc(A)} ${s.plays[0]} plays, ${esc(B)} ${s.plays[1]}`)).join("")}</ol>`
+          : `<p class="muted">No shared songs that you both played at least 3 times ${esc(scope)}.</p>`}`;
+    }).join("");
+  }
+  if (ttTab === "otd") {
+    const today = new Date(t.today + "T00:00").toLocaleDateString(undefined, {day: "numeric", month: "long"});
+    return `<p class="muted tt-intro">What you played on ${esc(today)} in earlier years, from your whole history.</p>
+      <div class="ins-grid">${t.people.map(p => `<div>${who(p.pid)}${p.on_this_day.length
+        ? `<ol class="tt-list">${p.on_this_day.map(o => ttRow(o.top, esc(o.date.slice(0, 4)),
+            `${plural(o.plays, "play")} of ${plural(o.songs, "song")} · ${fmt(o.ms)} · this was the most played`)).join("")}</ol>`
+        : `<p class="muted">Nothing played on ${esc(today)} in earlier years.</p>`}</div>`).join("")}</div>`;
+  }
+  const rows = {
+    comebacks: s => ttRow(s, `${fmtDays(s.gap_days)} away`,
+      `Last played ${esc(niceDay(s.left))}, back on ${esc(niceDay(s.back))} · ${s.before} plays before, ${s.after} since`),
+    steady: s => ttRow(s, `${plural(s.months, "month")}`,
+      `Played in ${s.months} of the ${s.span} months from ${esc(niceDay(s.first))} to ${esc(niceDay(s.last))} · ${s.plays.toLocaleString()} plays`),
+    flings: s => ttRow(s, `${s.window} plays in 30 days`,
+      `From ${esc(niceDay(s.start))}${s.window < s.plays ? ` (${s.plays} in total)` : ""}; last played ${esc(niceDay(s.last))}`),
+    slow: s => ttRow(s, `${fmtMonths(s.delay_months)} to peak`,
+      `First played ${esc(niceDay(s.first))}, busiest in ${esc(monthLabel(s.peak))} with ${s.peak_plays} plays`),
+  }[ttTab];
+  const empty = {
+    comebacks: "No song had a break of 2+ months with plays on both sides here. Try a longer time frame.",
+    steady: "No song played in several different months here yet.",
+    flings: "No flings: nothing was played this intensely and then dropped.",
+    slow: "No slow burners here. Try a longer time frame.",
+  }[ttTab];
+  return `<p class="muted tt-intro">${TT_INTRO[ttTab]} ${esc(scope[0].toUpperCase() + scope.slice(1))}.</p>
+    <div class="ins-grid">${t.people.map(p => `<div>${who(p.pid)}${p[ttTab].length
+      ? `<ol class="tt-list">${p[ttTab].slice(0, 8).map(rows).join("")}</ol>` : `<p class="muted">${empty}</p>`}</div>`).join("")}</div>`;
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-tt]");
+  if (!b || !ttData) return;
+  ttTab = b.dataset.tt;
+  b.parentElement.querySelectorAll("[data-tt]").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+  $("tt-body").innerHTML = ttBody();
 });

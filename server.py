@@ -37,7 +37,9 @@ API (all GET, JSON unless noted). Common parameters:
   /api/fun        per person: badges, top songs/artists, biggest day, longest
                   streak and the top song of each period ("eras"); era=day|month|
                   quarter|half|year (default month)
-  /api/cover      ?k=<key>: 302 redirect to the cover image (cached)
+  /api/time       per person: comebacks, ever-present songs, flings, slow
+                  burners, on this day; per pair: who found shared songs first
+  /api/cover      ?k=<key>: 302 redirect to the cover image (cached); s=small for a thumbnail
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
 """
 
@@ -439,6 +441,7 @@ class Library:
         self.level_agg = lru_cache(maxsize=64)(self._level_agg)
         self.insights = lru_cache(maxsize=32)(self._insights)
         self.fun = lru_cache(maxsize=32)(self._fun)
+        self.time_travel = lru_cache(maxsize=16)(self._time)
         self.match = lru_cache(maxsize=32)(self._match)
 
     # -------------------------------------------------------- aggregation --
@@ -939,7 +942,8 @@ class Library:
 
         def song(tid, **extra):
             artist, title = self.display[tid]
-            return {"key": self.keys[tid], "title": title, "sub": artist, "cover_key": self.keys[tid], **extra}
+            return {"key": self.keys[tid], "title": title, "sub": artist, "album": self.album_name[tid],
+                    "cover_key": self.keys[tid], **extra}
 
         def day_str(o):
             return datetime.fromordinal(o).strftime("%Y-%m-%d")
@@ -993,6 +997,134 @@ class Library:
             people.append(out)
 
         return {"people": people, "era": era}
+
+    # --------------------------------------------------------- time travel --
+    def _time(self, lo_ts, hi_ts, sel, minplay_ms, today):
+        """How songs move through time: comebacks, ever-present songs, flings, slow
+        burners, on this day (all history) and, for pairs, who found a song first."""
+        lo, hi = self._span(lo_ts, hi_ts)
+        selset = set(sel)
+        plays = {pid: defaultdict(list) for pid in sel}        # pid -> track -> [raw index], in time order
+        for i in range(lo, hi):
+            t, tid, pid, src, ms = self.raw[i][:5]
+            if pid in selset and t and ms >= minplay_ms:
+                plays[pid][tid].append(i)
+        ts, lday = self.ts, self.lday
+        month_of = {}
+
+        def month(i):                                          # local month index: year * 12 + month - 1
+            d = lday[i]
+            m = month_of.get(d)
+            if m is None:
+                dt = datetime.fromordinal(d) if d else datetime.fromtimestamp(ts[i], timezone.utc)
+                m = month_of[d] = dt.year * 12 + dt.month - 1
+            return m
+
+        def song(tid, **extra):
+            artist, title = self.display[tid]
+            return {"key": self.keys[tid], "title": title, "sub": artist, "album": self.album_name[tid],
+                    "cover_key": self.keys[tid], **extra}
+
+        def mstr(m):
+            return f"{m // 12}-{m % 12 + 1:02d}"
+
+        people = []
+        for pid in sel:
+            mine = plays[pid]
+            last_any = max((ts[idx[-1]] for idx in mine.values()), default=0.0)
+            comebacks, steady, flings, slow = [], [], [], []
+            for tid, idx in mine.items():
+                n = len(idx)
+                if n < 4:
+                    continue
+                t = [ts[i] for i in idx]
+                # comeback: the longest silence with at least 2 plays on each side
+                if n >= 4:
+                    k = max(range(1, n - 2), key=lambda j: t[j + 1] - t[j], default=None)
+                    if k is not None:
+                        gap = (t[k + 1] - t[k]) / DAY
+                        if gap >= 60:
+                            comebacks.append((gap, song(tid, gap_days=round(gap), left=iso_day(t[k]),
+                                                        back=iso_day(t[k + 1]), before=k + 1, after=n - k - 1)))
+                months = Counter(month(i) for i in idx)
+                if n >= 5:
+                    first_m, last_m = min(months), max(months)
+                    steady.append(((len(months), n), song(tid, months=len(months), span=last_m - first_m + 1,
+                                                          first=iso_day(t[0]), last=iso_day(t[-1]), plays=n)))
+                # fling: at least 10 plays, 80%+ of them within 30 days, then silent for 6+ months
+                if n >= 10 and last_any - t[-1] >= 180 * DAY:
+                    best, start, j = 0, 0, 0
+                    for a in range(n):
+                        while t[a] - t[j] > 30 * DAY:
+                            j += 1
+                        if a - j + 1 > best:
+                            best, start = a - j + 1, j
+                    if best >= 0.8 * n:
+                        flings.append((best, song(tid, window=best, plays=n, start=iso_day(t[start]),
+                                                  last=iso_day(t[-1]))))
+                # slow burner: the busiest month came 6+ months after the first play, and
+                # stands out (3x the song's average month), so steady favorites don't count
+                peak_m, peak_n = max(months.items(), key=lambda kv: (kv[1], -kv[0]))
+                delay = peak_m - month(idx[0])
+                life = max(months) - min(months) + 1
+                if peak_n >= 8 and delay >= 6 and peak_n >= 3 * n / life:
+                    slow.append((delay, song(tid, delay_months=delay, first=iso_day(t[0]), peak=mstr(peak_m),
+                                             peak_plays=peak_n, plays=n)))
+            top = lambda xs: [x for _, x in sorted(xs, key=lambda kv: kv[0], reverse=True)[:12]]
+            people.append({"pid": pid, "comebacks": top(comebacks), "steady": top(steady),
+                           "flings": top(flings), "slow": top(slow), "on_this_day": []})
+
+        # on this day: today's date in earlier years, over the whole history
+        td = datetime.fromordinal(today)
+        days = set()
+        first_year = datetime.fromtimestamp(self.ts[bisect.bisect_right(self.ts, 0.0)], timezone.utc).year \
+            if self.ts and self.ts[-1] else td.year
+        for y in range(first_year, td.year):
+            try:
+                days.add(td.replace(year=y).toordinal())
+            except ValueError:                             # 29 Feb in a non-leap year
+                pass
+        otd = {pid: defaultdict(lambda: [0, 0, Counter()]) for pid in sel}
+        if days:
+            for i, p in enumerate(self.raw):
+                if p[2] in selset and lday[i] in days and p[4] >= minplay_ms:
+                    rec = otd[p[2]][lday[i]]
+                    rec[0] += p[4]
+                    rec[1] += 1
+                    rec[2][p[1]] += p[4]
+        for person in people:
+            person["on_this_day"] = [
+                {"date": datetime.fromordinal(d).strftime("%Y-%m-%d"), "ms": ms, "plays": n, "songs": len(c),
+                 "top": song(c.most_common(1)[0][0])}
+                for d, (ms, n, c) in sorted(otd[person["pid"]].items(), reverse=True)]
+
+        # who found it first: shared songs, only when both people's histories had already started
+        found = []
+        for a_i, a in enumerate(sel):
+            for b in sel[a_i + 1:]:
+                pa, pb = plays[a], plays[b]
+                start = max(ts[min(idx[0] for idx in pa.values())] if pa else 0,
+                            ts[min(idx[0] for idx in pb.values())] if pb else 0)
+                wins, rows = Counter(), []
+                for tid in pa.keys() & pb.keys():
+                    fa, fb = ts[pa[tid][0]], ts[pb[tid][0]]
+                    if min(fa, fb) < start + 30 * DAY:             # one of you may have known it before your data starts
+                        continue
+                    lead = abs(fa - fb) / DAY
+                    if lead < 1:
+                        wins["tie"] += 1
+                        continue
+                    first, second = (a, b) if fa < fb else (b, a)
+                    wins[first] += 1
+                    both = min(len(pa[tid]), len(pb[tid]))
+                    if both >= 3:
+                        rows.append((both, song(tid, first=first, second=second, lead_days=round(lead),
+                                                found=iso_day(min(fa, fb)), followed=iso_day(max(fa, fb)),
+                                                plays=[len(pa[tid]), len(pb[tid])])))
+                rows.sort(key=lambda kv: kv[0], reverse=True)
+                found.append({"a": a, "b": b, "wins": {str(k): v for k, v in wins.items()},
+                              "since": iso_day(start + 30 * DAY), "songs": [x for _, x in rows[:15]]})
+        return {"people": people, "found": found, "today": td.strftime("%Y-%m-%d")}
 
     # ----------------------------------------------------------- insights --
     def _insights(self, lo_ts, hi_ts, sel, by, half_s, ref, minplay_ms):
@@ -1547,7 +1679,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
-                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun,
+                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -1635,6 +1767,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(self.lib.fun(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
                                     int(c["minplay_s"] * 1000), qs.get("era", "month")))
 
+    def api_time(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.time_travel(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                            int(c["minplay_s"] * 1000), datetime.now().toordinal()))
+
     def api_insights(self, qs):
         c = self.common(qs)
         lo_ts, hi_ts = day_to_ts(c["frm"]), day_to_ts(c["to"], end=True)
@@ -1667,6 +1804,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": f"Cover lookup failed: {e}"}, 503, {"Cache-Control": "no-store"})
             self.covers.set(key, url)
         if url:
+            if qs.get("s") == "small":                    # thumbnails for tiny squares (eras grid)
+                url = url.replace("600x600bb", "100x100bb").replace("/ab67616d00001e02", "/ab67616d00004851")
             self.send(302, headers={"Location": url, "Cache-Control": "public, max-age=604800"})
         else:
             self.send_json({"error": "No cover found"}, 404, {"Cache-Control": "public, max-age=86400"})
