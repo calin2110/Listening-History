@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const state = {
   frame: "all", from: "", to: "", q: "", sort: "total", min: 20, decay: 0, size: 48, page: 1,
   people: [], weights: {}, by: "plays", common: true, formula: "entropy", norm: false,   // multi-person
-  level: "track", view: "top", gap: 365, minplay: true, era: "month",
+  level: "track", view: "top", gap: 365, minplay: true, era: "month", itab: "overview",
 };
 let META = {people: [], years: []}, items = [], lastData = null, ctrl = null;
 
@@ -431,15 +431,18 @@ async function loadInsights() {
   body.style.opacity = ".5";
   try {
     const q = new URLSearchParams(baseParams());
-    const [r, rf, rt, rc] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
+    const [r, rf, rt, rc, rm, rmu] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
                                            fetch("/api/fun?" + new URLSearchParams({...baseParams(), era: state.era}),
                                                  {signal: mine.signal}),
                                            fetch("/api/time?" + q, {signal: mine.signal}),
-                                           fetch("/api/clock?" + q, {signal: mine.signal})]);
-    const [d, f, t, c] = await Promise.all([r.json(), rf.json(), rt.json(), rc.json()]);
+                                           fetch("/api/clock?" + q, {signal: mine.signal}),
+                                           fetch("/api/more?" + q, {signal: mine.signal}),
+                                           fetch("/api/music?" + q, {signal: mine.signal})]);
+    const [d, f, t, c, m, mu] = await Promise.all([r, rf, rt, rc, rm, rmu].map(x => x.json()));
     if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
-    body.innerHTML = renderInsights(d, rf.ok ? f : null, rt.ok ? t : null, rc.ok ? c : null);
-    body.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
+    body.innerHTML = renderInsights(d, rf.ok ? f : null, rt.ok ? t : null, rc.ok ? c : null,
+                                    rm.ok ? m : null, rmu.ok ? mu : null);
+    showInsTab(state.itab);
   } catch (e) {
     if (e.name === "AbortError") return;
     body.innerHTML = `<p class="muted">Couldn't load insights (${esc(e.message)}).</p>`;
@@ -458,29 +461,47 @@ function streakWhen(s) {
     : `${day(a)} ${time(a)} to ${day(b)} ${time(b)}`;
 }
 
-function renderInsights(d, f, t, c) {
-  const parts = [];
+// Insights is grouped into tabs; each section goes into one group
+const INS_TABS = [["overview", "Overview"], ["habits", "Habits"], ["time", "Through time"],
+                  ["music", "Your music"], ["places", "Places"]];
+function renderInsights(d, f, t, c, m, mu) {
+  const G = Object.fromEntries(INS_TABS.map(([k]) => [k, []]));
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
+  const fun = f && typeof renderFunSections === "function" ? renderFunSections(f) : [];
+  const has = name => typeof window[name] === "function";
+
   if (d.compat?.length) {
-    parts.push(`<div><h3>How compatible are you? <span class="muted">${esc(scope)}</span></h3>
+    G.overview.push(`<div><h3>How compatible are you? <span class="muted">${esc(scope)}</span></h3>
       ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`);
   }
-  if (f && typeof renderFunSections === "function") parts.push(...renderFunSections(f));
-  if (c && typeof renderClock === "function") parts.push(renderClock(c));
-  if (t && typeof renderTimeTravel === "function") parts.push(renderTimeTravel(t));
+  if (has("renderAwards") && state.people.length > 1) G.overview.push(renderAwards({d, f, t, c, m, mu}));
+  if (fun[0]) G.overview.push(fun[0]);                                   // listening personality
+  if (m && has("renderMilestones")) G.overview.push(renderMilestones(m));
+
+  if (c && has("renderClock")) G.habits.push(renderClock(c));
+  if (m && has("renderSessions")) G.habits.push(renderSessions(m));
+  if (m && has("renderCalendar")) G.habits.push(renderCalendar(m));
+  if (m && has("renderModes")) G.habits.push(renderModes(m));
+  if (m && has("renderDevices")) G.habits.push(renderDevices(m));
+
+  if (fun[1]) G.time.push(fun[1]);                                       // eras
+  if (t && has("renderTimeTravel")) G.time.push(renderTimeTravel(t));
+
+  if (mu && has("renderMusic")) G.music.push(renderMusic(mu));
+  if (m && has("renderLoveHate")) G.music.push(renderLoveHate(m));
 
   const streakList = (list, kind) => list.length
     ? `<ul class="streaks">${list.slice(0, 5).map(s => `<li><b>×${s.len}</b><span>${esc(s.title)}
         <small>${kind === "song" ? esc(s.sub) + " · " : ""}${streakWhen(s)} · ${fmt(s.ms)}</small></span></li>`).join("")}</ul>`
     : `<p class="muted">No ${kind} played twice in a row here.</p>`;
-  parts.push(`<div><h3>Longest streaks ${esc(scope)}</h3><div class="ins-grid">${d.streaks.map(s => `
+  G.time.push(`<div><h3>Longest streaks ${esc(scope)}</h3><div class="ins-grid">${d.streaks.map(s => `
     <div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(s.pid)}"><b>${esc(pname(s.pid))}</b></p>` : ""}
       <p class="muted">Same song, back to back</p>${streakList(s.songs, "song")}
       <p class="muted">Same artist, back to back</p>${streakList(s.artists, "artist")}
     </div>`).join("")}</div></div>`);
 
   const days = [...Array(7)].map((_, i) => new Date(2024, 0, 1 + i).toLocaleDateString(undefined, {weekday: "short"}));
-  parts.push(`<div><h3>When you listen</h3><div class="ins-grid">${d.clock.map(c => {
+  G.habits.splice(1, 0, `<div><h3>When you listen <span class="muted">day of the week × hour</span></h3><div class="ins-grid">${d.clock.map(c => {
     const max = Math.max(1, ...c.ms);
     let cells = `<span></span>` + [0, 6, 12, 18].map(h => `<span class="hl">${h}:00</span>`).join("");
     for (let day = 0; day < 7; day++) {
@@ -494,25 +515,42 @@ function renderInsights(d, f, t, c) {
       <div class="heat">${cells}</div></div>`;
   }).join("")}</div></div>`);
 
+  if (m && has("renderTrips")) G.places.push(renderTrips(m));
   // places: merge country codes (Spotify, Apple Music) and Tidal's country names for the same country
   const merged = new Map();
   d.places.forEach(p => {
     const name = placeName(p.place);
-    const m = merged.get(name) || {name, ms: 0, plays: 0, top: p.top, topMs: 0};
-    m.ms += p.ms; m.plays += p.plays;
-    if (p.ms > m.topMs) { m.top = p.top; m.topMs = p.ms; }
-    merged.set(name, m);
+    const x = merged.get(name) || {name, ms: 0, plays: 0, top: p.top, topMs: 0};
+    x.ms += p.ms; x.plays += p.plays;
+    if (p.ms > x.topMs) { x.top = p.top; x.topMs = p.ms; }
+    merged.set(name, x);
   });
   const places = [...merged.values()].sort((a, b) => b.ms - a.ms).slice(0, 8);
   if (places.length) {
     const max = places[0].ms;
-    parts.push(`<div><h3>Where you listened</h3><ul class="places">${places.map(p => `<li>
+    G.places.push(`<div><h3>Where you listened</h3><ul class="places">${places.map(p => `<li>
       <span>${esc(p.name)}</span><span class="muted">${hours(p.ms)}</span>
       <div class="bars"><i style="width:${p.ms / max * 100}%"></i></div>
       <small>Most played there: ${esc(p.top.title)} by ${esc(p.top.sub)}</small></li>`).join("")}</ul></div>`);
   }
-  return parts.join("");
+  const tabs = INS_TABS.filter(([k]) => G[k].length);
+  if (!tabs.some(([k]) => k === state.itab)) state.itab = tabs[0]?.[0] || "overview";
+  return `<div class="tabs ins-tabs" role="tablist" aria-label="Insights">${tabs.map(([k, l]) =>
+      `<button type="button" role="tab" data-itab="${k}" aria-selected="${k === state.itab}">${l}</button>`).join("")}</div>` +
+    tabs.map(([k]) => `<div class="ins-group" data-group="${k}" ${k === state.itab ? "" : "hidden"}>${G[k].join("")}</div>`).join("");
 }
+
+function showInsTab(tab) {
+  state.itab = tab;
+  document.querySelectorAll(".ins-tabs [data-itab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.itab === tab)));
+  document.querySelectorAll(".ins-group").forEach(g => { g.hidden = g.dataset.group !== tab; });
+  if (tab === "overview") document.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
+  writeHash();
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest(".ins-tabs [data-itab]");
+  if (b) showInsTab(b.dataset.itab);
+});
 
 // ---------------------------------------------------------- compatibility --
 const VERDICTS = [[0.6, "Musical soulmates"], [0.45, "On the same wavelength"], [0.3, "Plenty in common"],
@@ -546,6 +584,7 @@ function compatCard(c, weights) {
       <p class="compat-score"><span class="num">0</span><span class="unit">%</span></p>
       <p class="compat-verdict">${esc(verdict(c.overall))}</p>
       <button type="button" class="ghost replay">Play again</button>
+      <button type="button" class="ghost replay" data-share="compat" data-name="compatibility">Save image</button>
     </div>
     <ul class="compat-metrics">${rows.map(([k, label, help]) => `<li title="${esc(help)}">
       <span>${esc(label)}</span><span class="track"><i data-v="${c.metrics[k]}"></i></span><b>${pct(c.metrics[k])}</b>
@@ -600,7 +639,7 @@ function animateCompat(card) {
 // ------------------------------------------------------------- URL state --
 function writeHash() {
   const h = {f: state.frame, q: state.q, s: state.sort, m: state.min, d: state.decay, n: state.size, p: state.page,
-             lv: state.level, v: state.view, g: state.gap, mp: state.minplay ? 1 : 0, er: state.era};
+             lv: state.level, v: state.view, g: state.gap, mp: state.minplay ? 1 : 0, er: state.era, it: state.itab};
   if (state.frame === "custom") Object.assign(h, {from: state.from, to: state.to});
   if (META.people.length > 1) {
     Object.assign(h, {ppl: state.people.join(","), w: state.people.map(weight).join(","),
@@ -625,6 +664,7 @@ function readHash() {
   if (GAPS[+h.get("g")]) state.gap = +h.get("g");
   if (h.has("mp")) state.minplay = h.get("mp") !== "0";
   if (["day", "month", "quarter", "half", "year"].includes(h.get("er"))) state.era = h.get("er");
+  if (h.get("it")) state.itab = h.get("it");
 
   const n = META.people.length;
   const ppl = (h.get("ppl") || "").split(",").filter(x => x !== "").map(Number)

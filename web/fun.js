@@ -190,7 +190,8 @@ async function openRecap() {
     showRecapSlides([{bg: mix, html: `<div class="slide-center">
       <p class="eyebrow">Whose recap?</p>
       <div class="pick">${state.people.map(pid => `<button type="button" data-recap="${pid}" style="--c:${color(pid)}">${esc(pname(pid))}</button>`).join("")}
-        <button type="button" data-recap="together">${esc(listNames(state.people))} together</button></div></div>`}], false);
+        <button type="button" data-recap="together">${esc(listNames(state.people))} together</button>
+        <button type="button" data-recap="awards">🏆 Awards night</button></div></div>`}], false);
   } else {
     startRecap(state.people[0]);
   }
@@ -199,7 +200,8 @@ async function openRecap() {
 async function startRecap(which) {
   showRecapSlides([{bg: "var(--accent)", html: `<div class="slide-center"><p class="big-line">Getting your recap ready…</p></div>`}], false);
   try {
-    const slides = which === "together" ? await togetherSlides() : await personSlides(+which);
+    const slides = which === "together" ? await togetherSlides() : which === "awards" ? await awardSlides()
+      : await personSlides(+which);
     showRecapSlides(slides, true);
   } catch (e) {
     showRecapSlides([{bg: "var(--accent)", html: `<div class="slide-center"><p class="big-line">Couldn't load the recap (${esc(e.message)}).</p></div>`}], false);
@@ -216,8 +218,9 @@ async function getJSON(url) {
 async function personSlides(pid) {
   const p0 = funParams();
   p0.set("people", pid);
-  const [f, tt, ck] = await Promise.all([getJSON("/api/fun?" + p0), getJSON("/api/time?" + p0).catch(() => null),
-                                         getJSON("/api/clock?" + p0).catch(() => null)]);
+  const [f, tt, ck, mo, mu] = await Promise.all([getJSON("/api/fun?" + p0), getJSON("/api/time?" + p0).catch(() => null),
+    getJSON("/api/clock?" + p0).catch(() => null), getJSON("/api/more?" + p0).catch(() => null),
+    getJSON("/api/music?" + p0).catch(() => null)]);
   const p = f.people[0], name = pname(pid), c = color(pid);
   const you = META.people.length > 1 ? name : "You";
   const when = state.view === "rediscover" ? "of all time" : frameLabel();
@@ -263,6 +266,22 @@ async function personSlides(pid) {
       ${anthem ? `<p>😈 Demon-hours anthem: <b>${esc(anthem.title)}</b> by ${esc(anthem.sub)},
         ${plural(anthem.plays_here, "play")} between midnight and 3 am.</p>`
         : `<p>😈 Demon hours: ${demon.share < 0.005 ? "barely ever. Sensible." : pct(demon.share) + " of your listening."}</p>`}</div></div>`});
+  }
+  const ses = mo?.people?.[0]?.sessions;
+  if (ses?.openers?.length) {
+    const o = ses.openers[0], L = ses.longest;
+    slides.push({bg: c, html: `<div class="slide-split">${cover(o.cover_key, "art")}<div><p class="eyebrow">Your go-to opener</p>
+      <p class="huge">${esc(o.title)}</p><p>${esc(o.sub)}. It started ${plural(o.times, "listening session")}.</p>
+      ${L ? `<p>Longest session: ${fmt(L.ms)} and ${plural(L.songs, "song")} on ${esc(niceDay(L.start))}.</p>` : ""}</div></div>`});
+  }
+  const dna = mu?.people?.[0];
+  if (dna?.genres?.length) {
+    const dec = dna.decades.slice().sort((a, b) => b.share - a.share)[0];
+    slides.push({bg: c, html: `<div class="slide-list"><p class="eyebrow">${esc(you === "You" ? "Your" : name + "’s")} music DNA</p>
+      <p class="huge">${esc(dna.genres[0].genre)}</p>
+      <p>${pct(dna.genres[0].share)} of the listening${dna.genres[1] ? `, then ${esc(dna.genres[1].genre)} (${pct(dna.genres[1].share)})` : ""}${dna.genres[2] ? ` and ${esc(dna.genres[2].genre)}` : ""}.</p>
+      ${dec ? `<p>Mostly music from the ${dec.decade}s${dna.avg_age !== null ? `; songs are on average ${dna.avg_age} years old when played` : ""}.</p>` : ""}
+      ${dna.patience !== null ? `<p>Patience score: ${pct(dna.patience)} of songs heard to the end.</p>` : ""}</div>`});
   }
   const back = tt?.people?.[0]?.comebacks?.[0];
   if (back && back.gap_days >= 90) {
@@ -388,7 +407,7 @@ $("recap-stage").addEventListener("click", e => {
 });
 
 // ------------------------------------------------------------------ games --
-const game = {mode: "hilo", pool: [], a: null, b: null, score: 0, round: 0, busy: false, pid: null};
+const game = {mode: "tune", pool: [], a: null, b: null, score: 0, round: 0, busy: false, pid: null};
 const BEST_KEY = "music-stats-best";
 function bestScore(key) { try { return +(JSON.parse(localStorage.getItem(BEST_KEY) || "{}")[key] || 0); } catch { return 0; } }
 function saveBest(key, v) {
@@ -401,9 +420,10 @@ const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.f
 const pick = () => game.pool.splice(Math.floor(Math.random() * game.pool.length), 1)[0];
 
 function openGame() {
-  const modes = [["hilo", "Higher or lower"]];
+  const modes = [["tune", "Name that tune"], ["hilo", "Higher or lower"]];
   if (state.people.length > 1) modes.push(["who", "Who played it more?"]);
-  if (!modes.some(([m]) => m === game.mode)) game.mode = "hilo";
+  modes.push(["bracket", "Song bracket"], ["month", "Guess the month"]);
+  if (!modes.some(([m]) => m === game.mode)) game.mode = "tune";
   $("game-modes").innerHTML = modes.map(([m, l]) =>
     `<button type="button" role="tab" data-mode="${m}" aria-selected="${m === game.mode}">${l}</button>`).join("");
   $("game").showModal();
@@ -411,6 +431,8 @@ function openGame() {
 }
 
 async function newGame() {
+  stopTune?.();
+  if (typeof EXTRA_GAMES !== "undefined" && EXTRA_GAMES[game.mode]) return EXTRA_GAMES[game.mode]();   // more.js
   const box = $("game-stage");
   box.innerHTML = `<p class="muted">Shuffling songs…</p>`;
   game.score = 0; game.round = 0; game.busy = false;
@@ -514,6 +536,8 @@ function finishWho() {
 
 $("game-open").addEventListener("click", openGame);
 $("game-close").addEventListener("click", () => $("game").close());
+$("game").addEventListener("close", () => stopTune?.());
+var stopTune = null;                                   // set by more.js: stops a playing preview
 $("game-modes").addEventListener("click", e => {
   const b = e.target.closest("[data-mode]");
   if (!b || b.dataset.mode === game.mode) return;
@@ -722,3 +746,31 @@ function hoursSection(d) {
       ${pct(share)} of plays are ${esc(range)}.</p>
     <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Plays by hour of the day">${bars}${ticks}</svg></section>`;
 }
+
+
+// ---------------------------------------------------------- awards night --
+async function awardSlides() {
+  const q = funParams();
+  const [d, f, t, c, m, mu] = await Promise.all(["insights", "fun", "time", "clock", "more", "music"].map(x =>
+    getJSON(`/api/${x}?` + q).catch(() => null)));
+  const awards = computeAwards({d, f, t, c, m, mu});
+  const bg = `linear-gradient(135deg, ${state.people.map(color).join(", ")})`;
+  if (!awards.length) return [{bg, html: `<div class="slide-center"><p class="big-line">Not enough data for awards in this time frame.</p></div>`}];
+  const tally = {};
+  awards.forEach(a => { tally[a.winner] = (tally[a.winner] || 0) + 1; });
+  const champ = Object.entries(tally).sort((a, b) => b[1] - a[1]);
+  const slides = [{bg, html: `<div class="slide-center"><p class="eyebrow">${esc(frameLabel())}</p><p class="huge">🏆 Awards night</p>
+    <p>${plural(awards.length, "trophy").replace("trophys", "trophies")}. ${esc(listNames(state.people))}. Let’s see who takes them home.</p></div>`}];
+  awards.forEach(a => slides.push({bg: `linear-gradient(160deg, ${color(a.winner)}, #111)`, html: `<div class="slide-center award-slide">
+    <p class="huge">${a.emoji}</p><p class="eyebrow">${esc(a.title)}</p><p>${esc(a.desc)}</p>
+    <p class="big-line drum">And the award goes to…</p>
+    <p class="huge reveal">${esc(pname(a.winner))}</p>
+    <p class="reveal">${a.vals.map(v => `${esc(pname(v.pid))}: ${esc(v.text)}`).join(" · ")}</p></div>`,
+    onShow: stage => setTimeout(() => stage.querySelectorAll(".reveal").forEach(el => el.classList.add("on")), reduceMotion() ? 0 : 1600)}));
+  slides.push({bg, html: `<div class="slide-center"><p class="eyebrow">Final tally</p>
+    <p class="huge">${esc(pname(+champ[0][0]))} wins</p>
+    <p>${champ.map(([pid, n]) => `${esc(pname(+pid))}: ${plural(n, "trophy").replace("trophys", "trophies")}`).join(" · ")}</p>
+    <div class="pick"><button type="button" data-recap-again>Watch again</button><button type="button" data-recap-close>Close</button></div></div>`});
+  return slides;
+}
+$("recap-save").addEventListener("click", e => { e.stopPropagation(); saveImage($("recap-stage"), "recap"); });

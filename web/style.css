@@ -391,3 +391,87 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .hours .hb.on{fill:var(--accent)}
 .hours text{fill:var(--muted);font-size:11px;font-family:var(--font)}
 @media (max-width:640px){.clock-top{grid-template-columns:1fr;justify-items:center;text-align:center}}
+
+/* ---- insights tabs and new sections ---- */
+.ins-tabs{flex-wrap:wrap;position:sticky;top:0;z-index:4;margin-bottom:4px}
+.ins-group{display:grid;grid-template-columns:minmax(0,1fr);gap:28px}
+.ins-group > *{min-width:0}
+.sub-h{font-weight:600;margin:16px 0 6px}
+.big-stat{font-size:1.6rem;font-weight:800;margin:0}
+.cal-tabs{flex-wrap:wrap;margin:6px 0 12px}
+.cal-gap{height:18px}
+.stack{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--line);gap:2px;margin:8px 0}
+.stack i{display:block;min-width:2px}
+.stack-legend{list-style:none;margin:0 0 6px;padding:0;display:flex;flex-wrap:wrap;gap:4px 16px;font-size:.88rem}
+.stack-legend li{display:inline-flex;align-items:center;gap:6px}
+.stack-legend span{width:10px;height:10px;border-radius:3px}
+.trip{margin:0 0 14px}
+.trip p{margin:0 0 6px}
+.trip-covers{display:flex;gap:6px;flex-wrap:wrap}
+.trip-covers button{padding:0;border:0;background:none;cursor:pointer}
+.trip-covers img{width:52px;height:52px;object-fit:cover;border-radius:5px;background:var(--line);display:block}
+.gyears{display:grid;gap:6px}
+.gy{display:grid;grid-template-columns:3.2em 1fr minmax(6em,9em);gap:10px;align-items:center;font-size:.85rem}
+.gy .stack{margin:0;height:12px}
+.gy-top{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.decades{display:flex;align-items:flex-end;gap:6px;height:110px;margin:6px 0 14px}
+.decades div{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;gap:4px}
+.decades i{display:block;width:100%;max-width:44px;background:var(--accent);border-radius:4px 4px 0 0;opacity:.85}
+.decades span{font-size:.75rem;color:var(--muted)}
+.cov{font-size:.8rem;margin-top:10px}
+.share-row{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.share-row h3{margin:0}
+.ghost.small{font-size:.85rem;padding:4px 10px;margin-left:0}
+.awards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-top:10px}
+.award{border:1px solid var(--line);border-top:4px solid var(--c);border-radius:10px;padding:12px 14px;background:var(--bg)}
+.award .trophy{font-size:1.8rem}
+.award p{margin:2px 0}
+.aw-title{font-weight:600}
+.aw-winner{font-size:1.25rem;font-weight:800;color:var(--c)}
+.aw-desc{font-size:.82rem}
+.aw-vals{font-size:.8rem;color:var(--muted);display:grid}
+.compat .replay{margin-right:6px}
+.recap-save{position:absolute;z-index:3;top:max(10px,env(safe-area-inset-top));right:58px;font:600 .85rem var(--font);color:#fff;
+  background:rgba(255,255,255,.18);border:0;border-radius:999px;padding:6px 12px;cursor:pointer;margin-top:18px}
+.award-slide .reveal{opacity:0;transform:scale(.8);transition:opacity .5s,transform .5s cubic-bezier(.2,1.6,.4,1)}
+.award-slide .reveal.on{opacity:1;transform:none}
+/* games */
+.tune-disc{width:150px;height:150px;margin:0 auto 6px;border-radius:50%;display:grid;place-items:center;font-size:3rem;
+  background:radial-gradient(circle,var(--panel) 18%,var(--ink) 19%,var(--ink) 21%,#222 22%);overflow:hidden}
+.tune-disc img{width:100%;height:100%;object-fit:cover}
+.tune-disc.spin{animation:spin 3s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tune-opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;margin-top:14px}
+.tune-opts button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;
+  cursor:pointer;text-align:left;display:grid}
+.tune-opts button small{color:var(--muted)}
+.tune-opts button.win{border-color:#2b8a3e;background:rgba(43,138,62,.15)}
+.tune-opts button.lose{border-color:#c92a2a;background:rgba(201,42,42,.12)}
+.bracket-pair .pick{font:inherit;color:inherit;background:none;border:2px solid transparent;border-radius:12px;padding:8px;cursor:pointer}
+.bracket-pair .pick:hover{border-color:var(--accent)}
+.gm-songs{list-style:none;margin:0 auto;padding:0;display:grid;gap:6px;max-width:420px;text-align:left}
+.gm-songs li{display:grid;grid-template-columns:44px 1fr;gap:10px;align-items:center}
+.gm-songs img{width:44px;height:44px;object-fit:cover;border-radius:5px;background:var(--line)}
+.gm-songs small{display:block;color:var(--muted)}
+@media (prefers-reduced-motion:reduce){.tune-disc.spin{animation:none}.award-slide .reveal{transition:none}}
+
+/* ---- name that tune (Heardle style) ---- */
+.tune-stages{display:flex;gap:3px;max-width:520px;margin:0 auto 6px;font-size:.75rem}
+.tune-stages span{padding:4px 0;text-align:center;border-radius:4px;background:var(--line);color:var(--muted);min-width:38px;font-size:.72rem}
+.tune-stages span.used{background:#c92a2a;color:#fff}
+.tune-stages span.now{background:var(--accent);color:var(--bg);font-weight:700}
+.tune-progress{max-width:520px;height:6px;margin:0 auto 14px;border-radius:3px;background:var(--line);overflow:hidden}
+.tune-progress i{display:block;height:100%;width:0;background:var(--accent)}
+.tune-play{font-size:1.1rem!important;padding:12px 26px!important}
+.tune-form{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:14px auto 4px;max-width:560px}
+.tune-form input{flex:1 1 260px;min-width:0;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);
+  border-radius:999px;padding:10px 16px}
+.tune-form button{font:600 1rem var(--font);border-radius:999px;padding:10px 18px;cursor:pointer;border:0;color:var(--bg);background:var(--accent)}
+.tune-form button.ghost{color:var(--ink);background:none;border:1px solid var(--line);margin-left:0}
+.tune-history{list-style:none;margin:12px auto 0;padding:0;max-width:460px;text-align:left;display:grid;gap:4px;font-size:.92rem}
+.tune-history li{padding:6px 10px;border-radius:8px;background:var(--bg)}
+.tune-history li.ok{background:rgba(43,138,62,.18)}
+.tune-reveal{display:flex;gap:14px;align-items:center;justify-content:center;text-align:left;margin:6px 0 10px}
+.tune-reveal img{width:96px;height:96px;object-fit:cover;border-radius:8px;background:var(--line)}
+.tune-reveal .g-title{margin:0 0 2px}
+.tune-grid{font-size:1.15rem;line-height:1.25;margin:10px auto;letter-spacing:2px}

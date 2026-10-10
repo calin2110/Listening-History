@@ -40,9 +40,16 @@ API (all GET, JSON unless noted). Common parameters:
   /api/clock      per person: listening per hour of the day; per 3-hour block
                   (Demon hours, Ghost hours, ...) its share, top artist and the
                   songs played unusually often in it
+  /api/more       per person: sessions (openers, closers), seasons, weekdays,
+                  Christmas, chosen vs served, devices, places, love-hate songs,
+                  milestones
   /api/time       per person: comebacks, ever-present songs, flings, slow
                   burners, on this day; per pair: who found shared songs first
-  /api/cover      ?k=<key>: 302 redirect to the cover image (cached); s=small for a thumbnail
+  /api/cover      ?k=<key>: 302 redirect to the cover image (cached); s=small for a thumbnail,
+                  proxy=1 to get the image itself (for saving cards as images)
+  /api/music      genres, decades, nostalgia, song lengths (from music info looked up so far)
+  /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
+                  audio=1 returns the clip itself
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
 """
 
@@ -66,7 +73,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -277,6 +284,8 @@ class Library:
         self.keys, self.names, self.uris, self.albums, self.apple_ids = [], [], [], [], []
         # (ts, track_id, person_id, source, ms, skipped (1/0/None), place, time zone name)
         self.raw = []
+        self.extra = []                                # per play: (how it started, device), parallel to raw
+        self.meta_seed = {}                            # track key -> genre/year/duration from the exports
         self.undated = 0
 
     def person(self, name):
@@ -297,7 +306,7 @@ class Library:
         return tid
 
     def add(self, pid, ts, artist, title, ms, source, uri=None, album=None, skipped=None, place=None,
-            tzname=None, apple_id=None):
+            tzname=None, apple_id=None, mode=None, device=None):
         tid = self._track(artist, title)
         self.names[tid][(artist, title)] += ms + 1
         if uri and not self.uris[tid]:
@@ -311,10 +320,14 @@ class Library:
             self.undated += 1
             t = 0.0                                    # only shows up in "all time"
         self.raw.append((t, tid, pid, source, ms, skipped, place, tzname))
+        self.extra.append((mode, device))
+        return tid
 
     # ------------------------------------------------------------ indexing --
     def finalize(self):
-        self.raw.sort(key=lambda p: p[0])
+        order = sorted(range(len(self.raw)), key=lambda i: self.raw[i][0])
+        self.raw = [self.raw[i] for i in order]
+        self.extra = [self.extra[i] for i in order]
         self.ts = [p[0] for p in self.raw]
         n = len(self.keys)
         self.display = [c.most_common(1)[0][0] for c in self.names]
@@ -451,6 +464,7 @@ class Library:
         self.fun = lru_cache(maxsize=32)(self._fun)
         self.time_travel = lru_cache(maxsize=16)(self._time)
         self.clock = lru_cache(maxsize=32)(self._clock)
+        self.more = lru_cache(maxsize=16)(self._more)
         self.match = lru_cache(maxsize=32)(self._match)
 
     # -------------------------------------------------------- aggregation --
@@ -1015,6 +1029,289 @@ class Library:
 
         return {"people": people, "era": era}
 
+    def music(self, lo_ts, hi_ts, sel, minplay_ms, meta):
+        """Genres, decades and song lengths of the listening in a time frame, from the
+        music info gathered so far (coverage tells how much of the listening that is)."""
+        lo, hi = self._span(lo_ts, hi_ts)
+        selset = set(sel)
+        info = {}
+        P = {pid: {"ms": 0, "known_g": 0, "known_y": 0, "genres": Counter(), "decades": Counter(),
+                   "genre_year": defaultdict(Counter), "age_ms": 0.0, "old_ms": 0, "year_ms": 0.0,
+                   "years": defaultdict(Counter), "len_n": 0, "len_sum": 0, "full": 0, "full_n": 0,
+                   "finished": {}, "tracks": Counter()} for pid in sel}
+        for i in range(lo, hi):
+            t, tid, pid, src, ms = self.raw[i][:5]
+            if pid not in selset or ms < minplay_ms or not t:
+                continue
+            if tid not in info:
+                info[tid] = meta.get(tid) or {}
+            m, q = info[tid], P[pid]
+            q["ms"] += ms
+            q["tracks"][tid] += 1
+            play_year = datetime.fromtimestamp(t, timezone.utc).year
+            if m.get("genre"):
+                q["known_g"] += ms
+                q["genres"][m["genre"]] += ms
+                q["genre_year"][play_year][m["genre"]] += ms
+            y = m.get("year")
+            if y and 1900 < y <= play_year + 1:
+                q["known_y"] += ms
+                q["decades"][y // 10 * 10] += ms
+                age = max(play_year - y, 0)
+                q["age_ms"] += age * ms
+                q["year_ms"] += y * ms
+                q["old_ms"] += ms if age >= 10 else 0
+                q["years"][y][tid] += 1
+            d = m.get("duration_ms")
+            if d and d >= 60000:
+                q["len_n"] += 1
+                q["len_sum"] += d
+                q["full_n"] += 1
+                if ms >= 0.9 * d:
+                    q["full"] += 1
+                    if tid not in q["finished"] or q["finished"][tid] < d:
+                        q["finished"][tid] = d
+        people = []
+        for pid in sel:
+            q = P[pid]
+            tot, ky = q["ms"] or 1, q["known_y"] or 1
+            g_tot = q["known_g"] or 1
+            genres = [{"genre": g, "share": v / g_tot, "ms": v} for g, v in q["genres"].most_common(12)]
+            top_genres = [g["genre"] for g in genres[:6]]
+            by_year = []
+            for year in sorted(q["genre_year"]):
+                c = q["genre_year"][year]
+                ysum = sum(c.values()) or 1
+                by_year.append({"year": year, "top": c.most_common(1)[0][0],
+                                "shares": {g: c[g] / ysum for g in top_genres if c[g]}})
+            yrs = sorted(q["years"])
+            pick = lambda y: max(q["years"][y].items(), key=lambda kv: kv[1])[0]
+            oldest = next((self._song(pick(y), year=y) for y in yrs if sum(q["years"][y].values()) >= 3), None)
+            newest = next((self._song(pick(y), year=y) for y in reversed(yrs) if sum(q["years"][y].values()) >= 3), None)
+            longest = sorted(q["finished"].items(), key=lambda kv: -kv[1])[:5]
+            people.append({
+                "pid": pid, "coverage_genre": q["known_g"] / tot, "coverage_year": q["known_y"] / tot,
+                "genres": genres, "genre_years": by_year,
+                "decades": [{"decade": d, "share": v / ky} for d, v in sorted(q["decades"].items())],
+                "avg_year": round(q["year_ms"] / q["known_y"]) if q["known_y"] else None,
+                "avg_age": round(q["age_ms"] / q["known_y"], 1) if q["known_y"] else None,
+                "old_share": q["old_ms"] / ky if q["known_y"] else None,
+                "oldest": oldest, "newest": newest,
+                "avg_len_ms": q["len_sum"] / q["len_n"] if q["len_n"] else None,
+                "patience": q["full"] / q["full_n"] if q["full_n"] else None, "len_n": q["full_n"],
+                "longest_finished": [self._song(tid, duration_ms=d, plays=q["tracks"][tid]) for tid, d in longest],
+            })
+        return {"people": people, "progress": meta.progress()}
+
+    # -------------------------------------------------------- more angles --
+    XMAS = re.compile(r"christmas|xmas|santa|jingle|sleigh|mistletoe|rudolph|navidad|weihnacht|craciun|crăciun|"
+                      r"noel|noël|feliz navidad|holly jolly|let it snow|silent night|o holy night|frosty|"
+                      r"boże narodzenie|wesołych świąt|colinde|last christmas", re.I)
+    SEASONS = (("winter", "Winter", "❄️"), ("spring", "Spring", "🌱"), ("summer", "Summer", "☀️"), ("autumn", "Autumn", "🍂"))
+
+    def _signature(self, counts, totals, bucket_n, all_n, min_n=3, own_min=0.2, lift_min=1.5, limit=8):
+        """Songs played unusually often in a bucket. counts: track -> plays in bucket,
+        totals: track -> all plays, bucket_n / all_n: the person's plays in the bucket / overall."""
+        share = bucket_n / all_n if all_n else 0.0
+        out = []
+        for tid, n_b in counts.items():
+            n = totals[tid]
+            own = n_b / n
+            lift = own / share if share else 0.0
+            if n_b >= min_n and own >= own_min and lift >= lift_min:
+                out.append((n_b * min(lift, 6.0), tid, n_b, n, own))
+        out.sort(reverse=True)
+        return [self._song(tid, plays_here=n_b, plays=n, own=round(own, 3)) for _, tid, n_b, n, own in out[:limit]]
+
+    def _song(self, tid, **extra):
+        artist, title = self.display[tid]
+        return {"key": self.keys[tid], "title": title, "sub": artist, "album": self.album_name[tid],
+                "cover_key": self.keys[tid], **extra}
+
+    def _more(self, lo_ts, hi_ts, sel, minplay_ms):
+        """Sessions, seasons, weekdays, Christmas, chosen vs served, devices, trips,
+        love-hate songs (in the time frame) and milestones (whole history)."""
+        lo, hi = self._span(lo_ts, hi_ts)
+        selset = set(sel)
+        artist_of = self.levels["artist"].of_track
+        art = self.levels["artist"]
+        P = {pid: {"idx": [], "totals": Counter(), "season": [Counter() for _ in range(4)],
+                   "wday": [Counter() for _ in range(7)], "friday": Counter(), "modes": Counter(),
+                   "mode_tracks": defaultdict(Counter), "devices": Counter(), "dev_tracks": defaultdict(Counter),
+                   "places": defaultdict(lambda: [0, 0, math.inf, 0.0, Counter(), set()]),
+                   "skips": Counter(), "skip_n": Counter(), "months": defaultdict(set), "xmas": defaultdict(list)}
+             for pid in sel}
+        month_of = {}
+        for i in range(lo, hi):
+            t, tid, pid, src, ms, skipped, place, _ = self.raw[i]
+            if pid not in selset or not t:
+                continue
+            q = P[pid]
+            if skipped is not None:
+                q["skip_n"][tid] += 1
+                q["skips"][tid] += skipped
+            if ms < minplay_ms:
+                continue
+            q["idx"].append(i)
+            q["totals"][tid] += 1
+            day = self.lday[i]
+            mo = month_of.get(day)
+            if mo is None:
+                d = datetime.fromordinal(day) if day else datetime.fromtimestamp(t, timezone.utc)
+                mo = month_of[day] = (d.year, d.month)
+            q["months"][tid].add(mo)
+            q["season"][(mo[1] % 12) // 3][tid] += 1
+            h = self.how[i]
+            if h != 255:
+                wd, hour = h // 24, h % 24
+                q["wday"][wd][tid] += 1
+                if (wd == 4 and hour >= 18) or (wd == 5 and hour < 4):
+                    q["friday"][tid] += 1
+            mode, device = self.extra[i]
+            if mode:
+                q["modes"][mode] += ms
+                q["mode_tracks"][mode][tid] += 1
+            if device:
+                q["devices"][device] += ms
+                q["dev_tracks"][device][tid] += 1
+            if place:
+                pl = q["places"][place]
+                pl[0] += ms
+                pl[1] += 1
+                pl[2] = min(pl[2], t)
+                pl[3] = max(pl[3], t)
+                pl[4][tid] += ms
+                pl[5].add(day)
+            title, album = self.display[tid][1], self.album_name[tid] or ""
+            if self.XMAS.search(title) or self.XMAS.search(album):
+                q["xmas"][mo[0]].append((t, tid))
+
+        people = []
+        for pid in sel:
+            q = P[pid]
+            idx, totals = q["idx"], q["totals"]
+            all_n = len(idx)
+            out = {"pid": pid, "plays": all_n}
+
+            # sessions: a gap of 30+ minutes starts a new one
+            sessions, cur = [], None
+            for i in idx:
+                t, tid, ms = self.raw[i][0], self.raw[i][1], self.raw[i][4]
+                if cur and t - cur["end"] <= 1800:
+                    cur["end"] = t
+                    cur["n"] += 1
+                    cur["ms"] += ms
+                    cur["last"] = tid
+                    cur["tracks"][tid] += 1
+                else:
+                    cur = {"start": t, "end": t, "n": 1, "ms": ms, "first": tid, "last": tid, "tracks": Counter({tid: 1})}
+                    sessions.append(cur)
+            multi = [x for x in sessions if x["n"] >= 2]
+            openers = Counter(x["first"] for x in multi)
+            closers = Counter(x["last"] for x in multi)
+            longest = max(sessions, key=lambda x: x["ms"], default=None)
+            lengths = sorted(x["ms"] for x in sessions)
+            out["sessions"] = {
+                "count": len(sessions), "median_ms": lengths[len(lengths) // 2] if lengths else 0,
+                "avg_songs": round(all_n / len(sessions), 1) if sessions else 0,
+                "openers": [self._song(tid, times=n, of=len(multi)) for tid, n in openers.most_common(5) if n >= 2],
+                "closers": [self._song(tid, times=n, of=len(multi)) for tid, n in closers.most_common(5) if n >= 2],
+                "longest": {"start": iso_day(longest["start"]), "start_ts": longest["start"], "end_ts": longest["end"],
+                            "ms": longest["ms"], "songs": longest["n"],
+                            "top": self._song(longest["tracks"].most_common(1)[0][0])} if longest else None,
+            }
+
+            # seasons and weekdays: share, top artist, signature songs
+            def buckets(counters, names):
+                res = []
+                for c, (bid, name, emoji) in zip(counters, names):
+                    n_b = sum(c.values())
+                    top_art = Counter()
+                    for tid, n in c.items():
+                        top_art[artist_of[tid]] += n
+                    a = top_art.most_common(1)
+                    res.append({"id": bid, "name": name, "emoji": emoji, "plays": n_b,
+                                "share": n_b / all_n if all_n else 0.0, "artist": art.title[a[0][0]] if a else None,
+                                "signature": self._signature(c, totals, n_b, all_n),
+                                "top": [self._song(tid, plays_here=n) for tid, n in c.most_common(5)]})
+                return res
+            out["seasons"] = buckets(q["season"], self.SEASONS)
+            days = [(d.lower(), d, e) for d, e in zip(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                                                        "Saturday", "Sunday"), ("😩", "🌀", "🐪", "⏳", "🎉", "🛋️", "☁️"))]
+            out["weekdays"] = buckets(q["wday"], days)
+            fri_n = sum(q["friday"].values())
+            fri = self._signature(q["friday"], totals, fri_n, all_n, min_n=2, own_min=0.15, lift_min=1.3, limit=5)
+            out["friday"] = fri or [self._song(tid, plays_here=n) for tid, n in q["friday"].most_common(3)]
+
+            # Christmas: when it starts each year
+            xm = []
+            for year, plays in sorted(q["xmas"].items()):
+                autumn = [p for p in plays if datetime.fromtimestamp(p[0], timezone.utc).month >= 9]
+                if not autumn:
+                    continue
+                c = Counter(tid for _, tid in plays)
+                xm.append({"year": year, "first": iso_day(min(p[0] for p in autumn)), "plays": len(plays),
+                           "top": self._song(c.most_common(1)[0][0])})
+            out["christmas"] = xm
+
+            # chosen vs served
+            mode_ms = sum(q["modes"].values())
+            picked, served = q["mode_tracks"]["picked"], Counter()
+            for m in ("shuffle", "autoplay", "flow"):
+                served.update(q["mode_tracks"][m])
+            out["modes"] = {
+                "share": {m: q["modes"][m] / mode_ms for m in MODES} if mode_ms else {},
+                "known": mode_ms, "has_picked": bool(picked),
+                "picked": [self._song(tid, plays_here=n, plays=totals[tid], own=round(n / totals[tid], 3))
+                           for tid, n in picked.most_common(40) if n >= 3 and n / totals[tid] >= 0.5][:6],
+                "served": [self._song(tid, plays_here=n, plays=totals[tid], own=round(n / totals[tid], 3))
+                           for tid, n in served.most_common(60)
+                           if n >= 3 and n / totals[tid] >= 0.8 and picked[tid] == 0][:6],
+            }
+
+            # devices
+            dev_ms = sum(q["devices"].values())
+            out["devices"] = [{"id": d, "share": q["devices"][d] / dev_ms, "ms": q["devices"][d],
+                               "signature": self._signature(q["dev_tracks"][d], totals, sum(q["dev_tracks"][d].values()),
+                                                            all_n, limit=5) if len(q["devices"]) > 1 else [],
+                               "top": [self._song(tid, plays_here=n) for tid, n in q["dev_tracks"][d].most_common(3)]}
+                              for d in DEVICES if q["devices"][d]] if dev_ms else []
+
+            # places (the page decides which one is home, after merging country codes and names)
+            out["places"] = sorted(({"place": pl, "ms": v[0], "plays": v[1], "first": iso_day(v[2]), "last": iso_day(v[3]),
+                                     "days": len(v[5]), "top": [self._song(tid, ms=ms) for tid, ms in v[4].most_common(5)]}
+                                    for pl, v in q["places"].items()), key=lambda x: -x["ms"])[:15]
+
+            # love-hate: skipped a lot, played anyway, across months
+            lh = []
+            for tid, n_skip in q["skip_n"].items():
+                rate = q["skips"][tid] / n_skip
+                if n_skip >= 10 and rate >= 0.35 and totals[tid] >= 5 and len(q["months"][tid]) >= 2:
+                    lh.append((q["skips"][tid] * totals[tid], self._song(tid, skips=q["skips"][tid], skip_n=n_skip,
+                                                                      rate=round(rate, 3), plays=totals[tid],
+                                                                      months=len(q["months"][tid]))))
+            lh.sort(key=lambda x: x[0], reverse=True)
+            out["lovehate"] = [x for _, x in lh[:8]]
+            people.append(out)
+
+        # milestones over the whole history
+        marks_n = (1, 100, 1000, 10000, 50000, 100000, 250000, 500000)
+        marks_h = (1, 10, 100, 500, 1000, 2500, 5000, 10000)
+        for person in people:
+            pid, n, total, ms_list, hi_i, todo_h = person["pid"], 0, 0, [], 0, list(marks_h)
+            for i, p in enumerate(self.raw):
+                if p[2] != pid or not p[0] or p[4] < minplay_ms:
+                    continue
+                n += 1
+                total += p[4]
+                if hi_i < len(marks_n) and n == marks_n[hi_i]:
+                    ms_list.append({"kind": "play", "n": n, "date": iso_day(p[0]), "song": self._song(p[1])})
+                    hi_i += 1
+                while todo_h and total >= todo_h[0] * 3600000:
+                    ms_list.append({"kind": "hour", "n": todo_h.pop(0), "date": iso_day(p[0]), "song": self._song(p[1])})
+            person["milestones"] = sorted(ms_list, key=lambda m: (m["date"], m["kind"] == "hour"))
+        return {"people": people, "modes": MODES, "devices": DEVICES}
+
     # ----------------------------------------------------- around the clock --
     def _clock(self, lo_ts, hi_ts, sel, minplay_ms):
         """Per person: listening per hour of the day, and for each 3-hour block its share,
@@ -1312,6 +1609,26 @@ class Library:
         }
 
 
+# How a play started: picked (you chose it), flow (next on the album/playlist/queue),
+# shuffle, or autoplay (radio, autoplay after the queue ran out)
+MODES = ("picked", "flow", "shuffle", "autoplay")
+DEVICES = ("phone", "computer", "tv")                  # tv = TVs, consoles, speakers, cars
+
+
+def device_kind(s):
+    s = (s or "").lower()
+    if not s:
+        return None
+    if any(w in s for w in ("cast", "sonos", "partner", "_tv", " tv", "tv ", "playstation", "xbox", "console",
+                            "tesla", "android_auto", "carplay", "alexa", "echo", "speaker", "homepod", "roku")):
+        return "tv"                                    # checked first: "android_tv" or a console on Linux
+    if any(w in s for w in ("android", "ios", "iphone", "ipad", "phone")):
+        return "phone"
+    if any(w in s for w in ("windows", "os x", "osx", "mac", "linux", "web", "desktop", "chrome", "firefox")):
+        return "computer"
+    return None
+
+
 # ----------------------------------------------------------------- loading --
 #
 # Everything is read through "entries": plain files, given directly or found in
@@ -1418,9 +1735,14 @@ def load_spotify(entries, lib, pid):
             if not artist or not title:
                 continue                               # podcasts, audiobooks, video
             country = e.get("conn_country")
+            start = e.get("reason_start")
+            mode = ("picked" if start in ("clickrow", "playbtn", "backbtn") else
+                    "shuffle" if e.get("shuffle") else
+                    "flow" if start in ("trackdone", "fwdbtn", "appload", "remote", "trackerror") else None)
             lib.add(pid, ts, artist, title, int(ms or 0), SPOTIFY,
                     e.get("spotify_track_uri"), e.get("master_metadata_album_album_name"),
-                    skipped, f"c:{country}" if country and country != "ZZ" else None)
+                    skipped, f"c:{country}" if country and country != "ZZ" else None,
+                    mode=mode, device=device_kind(e.get("platform")))
             n += 1
         used += n > before
     if n:                                              # other exports (e.g. Apple's library) are .json too
@@ -1442,7 +1764,8 @@ def load_tidal(entries, lib, pid):
                 country = (row.get("country_name") or "").strip()
                 lib.add(pid, row.get("entry_date"), artist, title, ms, TIDAL,
                         place=f"n:{country}" if country else None,
-                        tzname=(row.get("time_zone") or "").strip() or None)
+                        tzname=(row.get("time_zone") or "").strip() or None,
+                        device=device_kind(row.get("client_name_from_session") or row.get("product_type")))
                 n += 1
     print(f"  Tidal:   {n:,} plays from {len(entries)} file(s)")
 
@@ -1476,6 +1799,7 @@ class AppleArtists:
         self.by_album = defaultdict(Counter)           # album -> artists
         self.daily = defaultdict(Counter)              # song -> artists (weighted by plays)
         self.ids = {}                                  # (song, album) or song -> Apple Music track id
+        self.meta = {}                                 # (song, album) -> genre, year, duration from the library
         self.overrides = {}
         for f in library:
             try:
@@ -1495,6 +1819,15 @@ class AppleArtists:
                 aid = t.get("Apple Music Track Identifier")
                 if aid:
                     self.ids.setdefault((_k(title), _k(album)), str(aid))
+                year = t.get("Track Year") or str(t.get("Release Date") or "")[:4]
+                try:
+                    year = int(year) if year else None
+                except ValueError:
+                    year = None
+                dur = t.get("Track Duration")
+                self.meta.setdefault((_k(title), _k(album)), {
+                    "genre": t.get("Genre") or None, "year": year,
+                    "duration_ms": int(dur) if isinstance(dur, (int, float)) and dur > 0 else None})
         for f in daily:
             with f.text() as fh:
                 for row in csv.DictReader(fh):
@@ -1561,9 +1894,14 @@ def load_apple(entries, library, daily, lib, pid):
                     pos = int(float(row.get("Start Position In Milliseconds") or 0))
                 except ValueError:
                     ms, pos = 0, 0
+                auto, shuffle = row.get("Auto Play") or "", row.get("Shuffle Play") or ""
+                mode = ("autoplay" if auto.startswith("AUTO_ON") or row.get("Container Type") == "RADIO" else
+                        "shuffle" if shuffle == "SHUFFLE_ON" else
+                        "flow" if shuffle == "SHUFFLE_OFF" else None)
+                device = device_kind(" ".join(row.get(c) or "" for c in ("Device Type", "Source Type", "Device OS Name")))
                 events.append((start or 0.0, song, row.get("Album Name") or "", ms, pos,
                                row.get("End Reason Type") or "", row.get("IP Country Code") or "",
-                               row.get("UTC Offset In Seconds") or ""))
+                               row.get("UTC Offset In Seconds") or "", mode, device))
     events.sort(key=lambda e: e[0])
 
     # Pausing or seeking ends an event, and resuming starts a new one at the same
@@ -1578,7 +1916,7 @@ def load_apple(entries, library, daily, lib, pid):
             last["reason"] = reason
             continue
         plays.append({"start": start, "song": song, "album": album, "ms": ms, "reason": reason,
-                      "country": e[6], "offset": e[7]})
+                      "country": e[6], "offset": e[7], "mode": e[8], "device": e[9]})
     stitched = len(events) - len(plays)
 
     artists = AppleArtists(library, daily)
@@ -1589,11 +1927,14 @@ def load_apple(entries, library, daily, lib, pid):
             missing[(p["song"], p["album"])] += 1
             continue
         country = p["country"].strip()
-        lib.add(pid, p["start"] or None, artist, p["song"], p["ms"], APPLE,
-                album=p["album"] or None, skipped=1 if p["reason"] in APPLE_SKIPS else 0,
-                place=f"c:{country}" if country else None,
-                tzname=f"offset:{p['offset']}" if p["offset"].lstrip("-").isdigit() else None,
-                apple_id=artists.track_id(p["song"], p["album"]))
+        tid = lib.add(pid, p["start"] or None, artist, p["song"], p["ms"], APPLE,
+                      album=p["album"] or None, skipped=1 if p["reason"] in APPLE_SKIPS else 0,
+                      place=f"c:{country}" if country else None,
+                      tzname=f"offset:{p['offset']}" if p["offset"].lstrip("-").isdigit() else None,
+                      apple_id=artists.track_id(p["song"], p["album"]), mode=p["mode"], device=p["device"])
+        m = artists.meta.get((_k(p["song"]), _k(p["album"])))
+        if m and lib.keys[tid] not in lib.meta_seed:
+            lib.meta_seed[lib.keys[tid]] = m
         n += 1
     print(f"  Apple:   {n:,} plays from {len(entries)} file(s) "
           f"({stitched:,} paused or seeked fragments joined into their plays)")
@@ -1719,6 +2060,150 @@ def lookup_lyrics(artist, title):
 
 
 
+
+# ------------------------------------------------------------- music info --
+#
+# Genre, release year, length and a 30-second preview per song, from Apple's free
+# iTunes Search API. It allows about 20 requests a minute, so a background thread
+# works through songs in order of how much they're played (yours first) and caches
+# the results in meta_cache.json. Songs in an Apple Music library export already
+# carry genre, year and length and need no request for those.
+
+def _meta_from_itunes(r):
+    year = str(r.get("releaseDate") or "")[:4]
+    return {"genre": r.get("primaryGenreName") or None, "year": int(year) if year.isdigit() else None,
+            "duration_ms": r.get("trackTimeMillis") or None, "preview": r.get("previewUrl") or None,
+            "apple_id": str(r["trackId"]) if r.get("trackId") else None}
+
+
+class MetaStore:
+    PAUSE = 3.2                                        # seconds between requests, ~19 a minute
+
+    def __init__(self, lib, path):
+        self.lib, self.cache = lib, JsonCache(path)
+        self.cv = threading.Condition()
+        self.done = 0
+        self.running = False
+        self.order = []
+        for key, m in lib.meta_seed.items():           # from the Apple library export
+            hit, old = self.cache.get(key)
+            if not hit or not old:
+                self.cache.set(key, dict(m, source="library"))
+
+    def get(self, tid):
+        return self.cache.get(self.lib.keys[tid])[1]
+
+    def start(self):
+        ms = Counter()
+        for p in self.lib.raw:
+            ms[p[1]] += p[4]
+        self.order = [tid for tid, _ in ms.most_common()]
+        self.running = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def progress(self):
+        known = sum(1 for tid in self.order if (self.cache.get(self.lib.keys[tid])[0]))
+        return {"looked_up": known, "total": len(self.order), "running": self.running}
+
+    def _todo(self):
+        for tid in self.order:
+            hit, m = self.cache.get(self.lib.keys[tid])
+            if not hit or (m and m.get("source") == "library" and m.get("apple_id") is None and not m.get("tried")):
+                yield tid
+
+    def _run(self):
+        while True:
+            batch, todo = [], self._todo()
+            for tid in todo:
+                if self.lib.apple_ids[tid]:
+                    batch.append(tid)
+                    if len(batch) >= 150:
+                        break
+                elif not batch:
+                    self.fetch(tid)
+                    break
+            else:
+                if not batch:
+                    self.running = False
+                    self.cache.save()
+                    with self.cv:
+                        self.cv.wait(timeout=300)  # sleep until asked for a preview
+                    self.running = True
+                    continue
+            if batch:
+                self._fetch_ids(batch)
+            time.sleep(self.PAUSE)
+
+    def _fetch_ids(self, tids, interactive=False):
+        try:
+            d = http_json("https://itunes.apple.com/lookup?" + urllib.parse.urlencode(
+                {"id": ",".join(self.lib.apple_ids[t] for t in tids), "entity": "song"}),
+                retries=1 if interactive else 2, timeout=8 if interactive else 15)
+        except Exception:
+            if not interactive:
+                time.sleep(60)                         # probably rate limited: the background thread backs off
+            return
+        found = {str(r.get("trackId")): r for r in (d or {}).get("results", []) if r.get("wrapperType") == "track"}
+        for tid in tids:
+            key = self.lib.keys[tid]
+            r = found.get(self.lib.apple_ids[tid])
+            old = self.cache.get(key)[1] or {}
+            new = _meta_from_itunes(r) if r else {}
+            self.cache.set(key, {**{k: v for k, v in new.items() if v}, **{k: v for k, v in old.items() if v},
+                                 "preview": new.get("preview") or old.get("preview"), "tried": True,
+                                 "source": old.get("source", "itunes")} if (r or old) else None)
+
+    def fetch(self, tid, interactive=False):
+        """Look one song up by name. Returns its info (or None). Interactive lookups
+        (someone is waiting, e.g. for a game clip) fail fast instead of backing off."""
+        key = self.lib.keys[tid]
+        artist, title = self.lib.display[tid]
+        clean = re.sub(r"\s*[\(\[](feat|ft|with)\.?\s[^\)\]]*[\)\]]", "", title, flags=re.I)
+        clean = re.sub(r"\s+-\s+.*remaster.*$", "", clean, flags=re.I)
+        try:
+            d = http_json("https://itunes.apple.com/search?" + urllib.parse.urlencode(
+                {"term": f"{artist} {clean}", "entity": "song", "limit": 10}),
+                retries=1 if interactive else 2, timeout=8 if interactive else 10)
+        except Exception:
+            if not interactive:
+                time.sleep(60)
+            return None
+        want_a, want_t = search_text(norm_artist(artist, True)), search_text(norm_title(clean, True))
+        best = None
+        for r in (d or {}).get("results", []):
+            ra = search_text(r.get("artistName", ""))
+            rt = search_text(norm_title(r.get("trackName", ""), True))
+            if not (ra.startswith(want_a[:6]) or want_a in ra):
+                continue                               # wrong artist: better no info than wrong info
+            if rt == want_t:
+                best = r
+                break
+            if best is None and (rt.startswith(want_t) or want_t.startswith(rt)):
+                best = r
+        old = self.cache.get(key)[1] or {}
+        if best:
+            new = _meta_from_itunes(best)
+            m = {**new, **{k: v for k, v in old.items() if v and k != "tried"}, "preview": new["preview"] or old.get("preview"),
+                 "tried": True, "source": old.get("source", "itunes")}
+        else:
+            m = dict(old, tried=True) if old else None
+        self.cache.set(key, m)
+        return m
+
+    def preview(self, tid):
+        m = self.get(tid)
+        if m and m.get("preview"):
+            return m["preview"]
+        if m and m.get("tried"):
+            return None
+        if self.lib.apple_ids[tid]:                     # exact lookup by Apple Music id first
+            self._fetch_ids([tid], interactive=True)
+            m = self.get(tid)
+            if m and m.get("preview"):
+                return m["preview"]
+        m = self.fetch(tid, interactive=True)
+        return m.get("preview") if m else None
+
 # ------------------------------------------------------------------ server --
 
 class BadParam(ValueError):
@@ -1727,7 +2212,8 @@ class BadParam(ValueError):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "MusicStats/2.0"
-    lib = covers = lyrics = web_root = None
+    lib = covers = lyrics = web_root = meta = None
+    clips, clip_lock = OrderedDict(), threading.Lock()   # recent preview clips
     verbose = False
 
     def log_message(self, fmt, *args):
@@ -1756,7 +2242,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
-                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock,
+                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/music": self.api_music, "/api/preview": self.api_preview,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -1844,6 +2330,42 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(self.lib.fun(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
                                     int(c["minplay_s"] * 1000), qs.get("era", "month")))
 
+    def api_music(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.music(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                      int(c["minplay_s"] * 1000), self.meta))
+
+    def api_preview(self, qs):
+        tid = self._track_key(qs)
+        if tid is None:
+            return
+        url = self.meta.preview(tid)
+        if not url:
+            return self.send_json({"error": "No preview found"}, 404)
+        if qs.get("audio") == "1":                        # the clip itself, same-origin, so the page can cut it precisely
+            with Handler.clip_lock:
+                hit = Handler.clips.get(url)
+                if hit:
+                    Handler.clips.move_to_end(url)
+            if not hit:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": UA})
+                    with urllib.request.urlopen(req, timeout=15) as r:   # not limited by NET: a different server
+                        hit = (r.read(8_000_000), r.headers.get("Content-Type", "audio/mp4"))
+                except Exception as e:
+                    return self.send_json({"error": f"Couldn't fetch the clip: {e}"}, 502)
+                with Handler.clip_lock:
+                    Handler.clips[url] = hit
+                    while len(Handler.clips) > 60:     # keep the last 60 clips in memory (~1 MB each)
+                        Handler.clips.popitem(last=False)
+            return self.send(200, hit[0], hit[1], {"Cache-Control": "public, max-age=86400"})
+        self.send_json({"url": url})
+
+    def api_more(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.more(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                     int(c["minplay_s"] * 1000)))
+
     def api_clock(self, qs):
         c = self.common(qs)
         self.send_json(self.lib.clock(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
@@ -1888,6 +2410,15 @@ class Handler(BaseHTTPRequestHandler):
         if url:
             if qs.get("s") == "small":                    # thumbnails for tiny squares (eras grid)
                 url = url.replace("600x600bb", "100x100bb").replace("/ab67616d00001e02", "/ab67616d00004851")
+            if qs.get("proxy") == "1":                     # same-origin copy, so cards can be saved as images
+                try:
+                    with NET:
+                        req = urllib.request.Request(url, headers={"User-Agent": UA})
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            body, ctype = r.read(5_000_000), r.headers.get("Content-Type", "image/jpeg")
+                except Exception as e:
+                    return self.send_json({"error": f"Couldn't fetch the cover: {e}"}, 502)
+                return self.send(200, body, ctype, {"Cache-Control": "public, max-age=604800"})
             self.send(302, headers={"Location": url, "Cache-Control": "public, max-age=604800"})
         else:
             self.send_json({"error": "No cover found"}, 404, {"Cache-Control": "public, max-age=86400"})
@@ -1939,6 +2470,8 @@ def main():
     ap.add_argument("--web", default=os.path.join(HERE, "web"), help="folder with index.html, app.js, style.css")
     ap.add_argument("--covers-cache", default="covers_cache.json")
     ap.add_argument("--lyrics-cache", default="lyrics_cache.json")
+    ap.add_argument("--meta-cache", default="meta_cache.json", help="genres, years, lengths, previews")
+    ap.add_argument("--no-music-info", action="store_true", help="don't look up genres/years/previews in the background")
     ap.add_argument("--strict", action="store_true",
                     help="exact name matching (don't merge 'feat.'/'Remastered'/accent variants)")
     ap.add_argument("--open", action="store_true", help="open the page in your browser")
@@ -1978,6 +2511,9 @@ def main():
     Handler.lib = lib
     Handler.covers = JsonCache(args.covers_cache)
     Handler.lyrics = JsonCache(args.lyrics_cache)
+    Handler.meta = MetaStore(lib, args.meta_cache)
+    if not args.no_music_info:
+        Handler.meta.start()
     Handler.web_root = os.path.realpath(args.web)
     Handler.verbose = args.verbose
     if not os.path.isfile(os.path.join(Handler.web_root, "index.html")):
@@ -1995,6 +2531,7 @@ def main():
     finally:
         Handler.covers.save()
         Handler.lyrics.save()
+        Handler.meta.cache.save()
         srv.server_close()
 
 
