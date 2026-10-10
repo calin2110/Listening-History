@@ -431,13 +431,14 @@ async function loadInsights() {
   body.style.opacity = ".5";
   try {
     const q = new URLSearchParams(baseParams());
-    const [r, rf, rt] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
+    const [r, rf, rt, rc] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
                                            fetch("/api/fun?" + new URLSearchParams({...baseParams(), era: state.era}),
                                                  {signal: mine.signal}),
-                                           fetch("/api/time?" + q, {signal: mine.signal})]);
-    const [d, f, t] = await Promise.all([r.json(), rf.json(), rt.json()]);
+                                           fetch("/api/time?" + q, {signal: mine.signal}),
+                                           fetch("/api/clock?" + q, {signal: mine.signal})]);
+    const [d, f, t, c] = await Promise.all([r.json(), rf.json(), rt.json(), rc.json()]);
     if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
-    body.innerHTML = renderInsights(d, rf.ok ? f : null, rt.ok ? t : null);
+    body.innerHTML = renderInsights(d, rf.ok ? f : null, rt.ok ? t : null, rc.ok ? c : null);
     body.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
   } catch (e) {
     if (e.name === "AbortError") return;
@@ -457,7 +458,7 @@ function streakWhen(s) {
     : `${day(a)} ${time(a)} to ${day(b)} ${time(b)}`;
 }
 
-function renderInsights(d, f, t) {
+function renderInsights(d, f, t, c) {
   const parts = [];
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
   if (d.compat?.length) {
@@ -465,6 +466,7 @@ function renderInsights(d, f, t) {
       ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`);
   }
   if (f && typeof renderFunSections === "function") parts.push(...renderFunSections(f));
+  if (c && typeof renderClock === "function") parts.push(renderClock(c));
   if (t && typeof renderTimeTravel === "function") parts.push(renderTimeTravel(t));
 
   const streakList = (list, kind) => list.length
@@ -688,6 +690,7 @@ async function openDetail(item, fromStack = false) {
   }${links}</div></section>`);
 
   if (d.buckets.length > 1) sections.push(`<section class="timeline"><h3>Over time</h3>${timelineSVG(d)}</section>`);
+  if (typeof hoursSection === "function") sections.push(hoursSection(d));
 
   if (d.kind === "track") {
     sections.push(`<section><h3>Lyrics</h3><div class="lyrics status" id="dlg-lyrics">Loading lyrics…</div></section>`);

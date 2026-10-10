@@ -37,6 +37,9 @@ API (all GET, JSON unless noted). Common parameters:
   /api/fun        per person: badges, top songs/artists, biggest day, longest
                   streak and the top song of each period ("eras"); era=day|month|
                   quarter|half|year (default month)
+  /api/clock      per person: listening per hour of the day; per 3-hour block
+                  (Demon hours, Ghost hours, ...) its share, top artist and the
+                  songs played unusually often in it
   /api/time       per person: comebacks, ever-present songs, flings, slow
                   burners, on this day; per pair: who found shared songs first
   /api/cover      ?k=<key>: 302 redirect to the cover image (cached); s=small for a thumbnail
@@ -174,6 +177,11 @@ def day_to_ts(s, end=False):
 SOURCES = ("spotify", "tidal", "apple")
 SPOTIFY, TIDAL, APPLE = range(3)
 NSRC = len(SOURCES)
+
+# The day in 3-hour blocks: (id, name, emoji); block = local hour // 3
+DAYPARTS = (("demon", "Demon hours", "😈"), ("ghost", "Ghost hours", "👻"), ("sunrise", "Sunrise", "🌅"),
+            ("coffee", "Coffee hours", "☕"), ("lunch", "Lunch break", "🍜"), ("drift", "Afternoon drift", "🌤️"),
+            ("golden", "Golden hour", "🌇"), ("night", "Night drive", "🌙"))
 
 # per-person record: [ms per source..., plays, score_ms, first_ts, last_ts, skips, plays_with_skip_info]
 PLAYS, SCORE, FIRST, LAST, SKIPS, SKIP_N = range(NSRC, NSRC + 6)
@@ -442,6 +450,7 @@ class Library:
         self.insights = lru_cache(maxsize=32)(self._insights)
         self.fun = lru_cache(maxsize=32)(self._fun)
         self.time_travel = lru_cache(maxsize=16)(self._time)
+        self.clock = lru_cache(maxsize=32)(self._clock)
         self.match = lru_cache(maxsize=32)(self._match)
 
     # -------------------------------------------------------- aggregation --
@@ -731,10 +740,15 @@ class Library:
         lo_ts, hi_ts = day_to_ts(frm), day_to_ts(to, end=True)
         minplay_ms = minplay_s * 1000
         idx = sorted(i for tid in lvl.members[gid] for i in self.track_plays[tid])
-        in_frame = [self.raw[i] for i in idx
-                    if self.raw[i][2] in selset and self.raw[i][0]
-                    and (lo_ts is None or self.raw[i][0] >= lo_ts) and (hi_ts is None or self.raw[i][0] < hi_ts)]
+        in_idx = [i for i in idx
+                  if self.raw[i][2] in selset and self.raw[i][0]
+                  and (lo_ts is None or self.raw[i][0] >= lo_ts) and (hi_ts is None or self.raw[i][0] < hi_ts)]
+        in_frame = [self.raw[i] for i in in_idx]
         plays = [p for p in in_frame if p[4] >= minplay_ms]   # skips still count from in_frame
+        hours = [0] * 24                                     # plays per local hour of the day
+        for i in in_idx:
+            if self.raw[i][4] >= minplay_ms and self.how[i] != 255:
+                hours[self.how[i] % 24] += 1
 
         per = {pid: {"pid": pid, "plays": 0, "ms": 0, "skips": 0, "skip_n": 0, "first": None, "last": None}
                for pid in sel}
@@ -785,7 +799,7 @@ class Library:
                 data[pid][1][b] += ms
             series = [{"pid": pid, "plays": data[pid][0], "ms": data[pid][1]} for pid in sel]
 
-        out = {"kind": lvl.name, "key": key, "title": lvl.title[gid], "sub": lvl.sub[gid],
+        out = {"kind": lvl.name, "key": key, "title": lvl.title[gid], "sub": lvl.sub[gid], "hours": hours,
                "unit": unit, "buckets": buckets, "series": series, "per": [per[p] for p in sel],
                "top": []}
         if lvl.name == "track":
@@ -856,6 +870,8 @@ class Library:
     # ---------------------------------------------------------------- fun --
     # Badges: (id, name, emoji, test on the person's stats, description of the number)
     BADGES = [
+        ("demon", "Demon hours regular", "😈", lambda s: s["demon"] >= 0.10,
+         lambda s: f"{s['demon']:.0%} of your listening happens between midnight and 3 am"),
         ("night_owl", "Night owl", "🦉", lambda s: s["night"] >= 0.15,
          lambda s: f"{s['night']:.0%} of your listening happens between midnight and 5 am"),
         ("early_bird", "Early bird", "🌅", lambda s: s["morning"] >= 0.2,
@@ -900,7 +916,7 @@ class Library:
         selset = set(sel)
         artist_of = self.levels["artist"].of_track
         art = self.levels["artist"]
-        st = {pid: {"ms": 0, "plays": 0, "tracks": Counter(), "artists": Counter(), "night": 0, "morning": 0,
+        st = {pid: {"ms": 0, "plays": 0, "tracks": Counter(), "artists": Counter(), "night": 0, "demon": 0, "morning": 0,
                     "weekend": 0, "work": 0, "days": Counter(), "day_track": Counter(), "skips": 0, "skip_n": 0,
                     "run": [None, 0], "streak": (0, None)} for pid in sel}
         periods = defaultdict(Counter)                         # (person, first day of period) -> track -> ms
@@ -923,6 +939,7 @@ class Library:
             if h != 255:
                 hour, wd = h % 24, h // 24
                 s["night"] += ms if hour < 5 else 0
+                s["demon"] += ms if hour < 3 else 0
                 s["morning"] += ms if 5 <= hour < 9 else 0
                 s["weekend"] += ms if wd >= 5 else 0
                 s["work"] += ms if wd < 5 and 9 <= hour < 17 else 0
@@ -956,7 +973,7 @@ class Library:
             best_day = s["days"].most_common(1)
             stats = {
                 "plays": s["plays"], "songs": len(s["tracks"]),
-                "night": s["night"] / total, "morning": s["morning"] / total,
+                "night": s["night"] / total, "demon": s["demon"] / total, "morning": s["morning"] / total,
                 "weekend": s["weekend"] / total, "work": s["work"] / total,
                 "top10": sum(v for _, v in s["tracks"].most_common(10)) / total,
                 "variety": len(s["tracks"]) / max(s["plays"], 1),
@@ -997,6 +1014,66 @@ class Library:
             people.append(out)
 
         return {"people": people, "era": era}
+
+    # ----------------------------------------------------- around the clock --
+    def _clock(self, lo_ts, hi_ts, sel, minplay_ms):
+        """Per person: listening per hour of the day, and for each 3-hour block its share,
+        top artist and "signature" songs: ones played unusually often in that block."""
+        lo, hi = self._span(lo_ts, hi_ts)
+        selset = set(sel)
+        artist_of = self.levels["artist"].of_track
+        hours = {pid: [0] * 24 for pid in sel}
+        blocks = {pid: [0] * 8 for pid in sel}                       # plays per block
+        songs = {pid: defaultdict(lambda: [0] * 9) for pid in sel}   # track -> plays per block + total
+        artists = {pid: [Counter() for _ in range(8)] for pid in sel}
+        for i in range(lo, hi):
+            p = self.raw[i]
+            pid, ms, h = p[2], p[4], self.how[i]
+            if pid not in selset or ms < minplay_ms or h == 255:
+                continue
+            hour = h % 24
+            b = hour // 3
+            hours[pid][hour] += ms
+            blocks[pid][b] += 1
+            rec = songs[pid][p[1]]
+            rec[b] += 1
+            rec[8] += 1
+            artists[pid][b][artist_of[p[1]]] += ms
+        art = self.levels["artist"]
+
+        def song(tid, **extra):
+            artist, title = self.display[tid]
+            return {"key": self.keys[tid], "title": title, "sub": artist, "album": self.album_name[tid],
+                    "cover_key": self.keys[tid], **extra}
+
+        people = []
+        for pid in sel:
+            total = sum(blocks[pid]) or 1
+            parts = []
+            for b, (part_id, name, emoji) in enumerate(DAYPARTS):
+                share = blocks[pid][b] / total
+                sig, top = [], []
+                for tid, rec in songs[pid].items():
+                    n_b, n = rec[b], rec[8]
+                    if not n_b:
+                        continue
+                    top.append((n_b, tid))
+                    own = n_b / n                                  # how much of this song's plays are in this block
+                    lift = own / share if share else 0.0
+                    if n_b >= 3 and own >= 0.2 and lift >= 1.5:
+                        sig.append((n_b * min(lift, 6.0), tid, n_b, n, own))
+                sig.sort(reverse=True)
+                top.sort(reverse=True)
+                a = artists[pid][b].most_common(1)
+                parts.append({
+                    "id": part_id, "share": share, "plays": blocks[pid][b],
+                    "artist": art.title[a[0][0]] if a else None,
+                    "signature": [song(tid, plays_here=n_b, plays=n, own=round(own, 3)) for _, tid, n_b, n, own in sig[:8]],
+                    "top": [song(tid, plays_here=n_b) for n_b, tid in top[:5]],
+                })
+            people.append({"pid": pid, "hours": hours[pid], "plays": sum(blocks[pid]), "parts": parts})
+        return {"people": people, "dayparts": [{"id": i, "name": n, "emoji": e, "from": 3 * k, "to": 3 * k + 3}
+                                               for k, (i, n, e) in enumerate(DAYPARTS)]}
 
     # --------------------------------------------------------- time travel --
     def _time(self, lo_ts, hi_ts, sel, minplay_ms, today):
@@ -1679,7 +1756,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
-                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time,
+                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -1766,6 +1843,11 @@ class Handler(BaseHTTPRequestHandler):
         c = self.common(qs)
         self.send_json(self.lib.fun(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
                                     int(c["minplay_s"] * 1000), qs.get("era", "month")))
+
+    def api_clock(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.clock(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                      int(c["minplay_s"] * 1000)))
 
     def api_time(self, qs):
         c = self.common(qs)

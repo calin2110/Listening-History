@@ -216,7 +216,8 @@ async function getJSON(url) {
 async function personSlides(pid) {
   const p0 = funParams();
   p0.set("people", pid);
-  const [f, tt] = await Promise.all([getJSON("/api/fun?" + p0), getJSON("/api/time?" + p0).catch(() => null)]);
+  const [f, tt, ck] = await Promise.all([getJSON("/api/fun?" + p0), getJSON("/api/time?" + p0).catch(() => null),
+                                         getJSON("/api/clock?" + p0).catch(() => null)]);
   const p = f.people[0], name = pname(pid), c = color(pid);
   const you = META.people.length > 1 ? name : "You";
   const when = state.view === "rediscover" ? "of all time" : frameLabel();
@@ -250,6 +251,18 @@ async function personSlides(pid) {
     slides.push({bg: c, html: `<div class="slide-center"><p class="eyebrow">On repeat</p>
       ${s ? `<p class="huge">×${s.len}</p><p>${esc(s.title)} by ${esc(s.sub)}, back to back. That’s ${esc(you === "You" ? "your" : name + "’s")} longest streak.</p>` : ""}
       ${r && r.plays > 1 ? `<p>And on ${esc(niceDay(r.date))}, ${esc(r.title)} played ${r.plays} times in one day.</p>` : ""}</div>`});
+  }
+  const cp = ck?.people?.[0];
+  if (cp?.plays) {
+    const dps = ck.dayparts, best = cp.parts.reduce((a, x, i) => x.share > cp.parts[a].share ? i : a, 0);
+    const demon = cp.parts[0], anthem = demon.signature[0] || (demon.top[0]?.plays_here >= 3 ? demon.top[0] : null);
+    slides.push({bg: c, html: `<div class="slide-split"><div class="clock-slide">${radialClock(cp.hours, "#fff", best, dps)}</div><div>
+      <p class="eyebrow">Around the clock</p><p class="huge">${dps[best].emoji} ${esc(dps[best].name)}</p>
+      <p>That’s when ${esc(you === "You" ? "your" : name + "’s")} music peaks: ${pctSmall(cp.parts[best].share)} of all listening,
+        ${esc(partRange(dps[best]))}.</p>
+      ${anthem ? `<p>😈 Demon-hours anthem: <b>${esc(anthem.title)}</b> by ${esc(anthem.sub)},
+        ${plural(anthem.plays_here, "play")} between midnight and 3 am.</p>`
+        : `<p>😈 Demon hours: ${demon.share < 0.005 ? "barely ever. Sensible." : pct(demon.share) + " of your listening."}</p>`}</div></div>`});
   }
   const back = tt?.people?.[0]?.comebacks?.[0];
   if (back && back.gap_days >= 90) {
@@ -617,3 +630,95 @@ document.addEventListener("click", e => {
   b.parentElement.querySelectorAll("[data-tt]").forEach(x => x.setAttribute("aria-selected", String(x === b)));
   $("tt-body").innerHTML = ttBody();
 });
+
+
+// ------------------------------------------------------- around the clock --
+let clockPart = 0, clockData = null;
+const hourName = h => new Date(2024, 0, 1, h % 24).toLocaleTimeString(undefined, {hour: "numeric"});
+const partRange = dp => `${hourName(dp.from)}–${hourName(dp.to)}`;
+const pctSmall = x => x > 0 && x < 0.005 ? "<1%" : pct(x);
+
+// 24 wedges, one per hour, length = listening that hour; the chosen 3-hour block is highlighted
+function radialClock(hours, col, sel, dps) {
+  const cx = 110, cy = 110, r0 = 34, r1 = 92, max = Math.max(1, ...hours);
+  const pt = (r, a) => `${(cx + r * Math.cos(a)).toFixed(2)},${(cy + r * Math.sin(a)).toFixed(2)}`;
+  let svg = `<svg class="radial" viewBox="0 0 220 220" role="img" aria-label="Listening by hour of the day">
+    <circle cx="${cx}" cy="${cy}" r="${r1}" class="rc-guide"/><circle cx="${cx}" cy="${cy}" r="${r0}" class="rc-guide"/>`;
+  hours.forEach((v, h) => {
+    const a0 = h / 24 * 2 * Math.PI - Math.PI / 2 + 0.018, a1 = (h + 1) / 24 * 2 * Math.PI - Math.PI / 2 - 0.018;
+    const r = r0 + (r1 - r0) * Math.sqrt(v / max);
+    const on = Math.floor(h / 3) === sel;
+    svg += `<path d="M${pt(r0, a0)} L${pt(r, a0)} A${r} ${r} 0 0 1 ${pt(r, a1)} L${pt(r0, a1)} A${r0} ${r0} 0 0 0 ${pt(r0, a0)} Z"
+      fill="${col}" opacity="${on ? 1 : 0.3}" data-part="${Math.floor(h / 3)}"><title>${hourName(h)}–${hourName(h + 1)}: ${fmt(v)}</title></path>`;
+  });
+  dps.forEach((dp, b) => {
+    const a = (b * 3 + 1.5) / 24 * 2 * Math.PI - Math.PI / 2;
+    svg += `<text x="${(cx + 104 * Math.cos(a)).toFixed(1)}" y="${(cy + 104 * Math.sin(a) + 5).toFixed(1)}" text-anchor="middle"
+      class="rc-emoji${b === sel ? " on" : ""}" data-part="${b}">${dp.emoji}<title>${esc(dp.name)}</title></text>`;
+  });
+  [0, 6, 12, 18].forEach(h => {
+    const a = h / 24 * 2 * Math.PI - Math.PI / 2;
+    svg += `<text x="${(cx + 22 * Math.cos(a)).toFixed(1)}" y="${(cy + 22 * Math.sin(a) + 3.5).toFixed(1)}" text-anchor="middle" class="rc-hour">${h}</text>`;
+  });
+  return svg + `</svg>`;
+}
+
+function renderClock(c) {
+  if (!c?.people?.some(p => p.plays)) return "";
+  clockData = c;
+  return `<div><h3>Around the clock <span class="muted">when you listen, and what you play at each hour</span></h3>
+    <div class="tabs dp-tabs" role="tablist" aria-label="Time of day">${c.dayparts.map((dp, b) =>
+      `<button type="button" role="tab" data-part="${b}" aria-selected="${b === clockPart}">${dp.emoji} ${esc(dp.name)}</button>`).join("")}</div>
+    <div id="clock-body">${clockBody()}</div></div>`;
+}
+
+function clockBody() {
+  const c = clockData, dp = c.dayparts[clockPart], many = META.people.length > 1;
+  return `<div class="ins-grid">${c.people.map(p => {
+    const part = p.parts[clockPart], your = many ? pname(p.pid) + "’s" : "your";
+    const list = part.signature.length
+      ? `<p class="muted tt-intro">Signature songs: played here far more than ${esc(your)} usual.</p>
+         <ol class="tt-list">${part.signature.slice(0, 6).map(s => ttRow(s, `${pct(s.own)} of its plays`,
+           `${s.plays_here} of ${plural(s.plays, "play")} are during ${esc(dp.name.toLowerCase())}`)).join("")}</ol>`
+      : part.top.length
+        ? `<p class="muted tt-intro">Most played during ${esc(dp.name.toLowerCase())}:</p>
+           <ol class="tt-list">${part.top.slice(0, 5).map(s => ttRow(s, plural(s.plays_here, "play"), "")).join("")}</ol>`
+        : `<p class="muted">${dp.id === "demon" ? "No demon hours here. Respect." : "Nothing played at this time of day."}</p>`;
+    return `<div class="clock-card">${many ? `<p class="who-h" style="--c:${color(p.pid)}"><b>${esc(pname(p.pid))}</b></p>` : ""}
+      <div class="clock-top">${radialClock(p.hours, color(p.pid), clockPart, c.dayparts)}
+        <div><p class="clock-name">${dp.emoji} ${esc(dp.name)}</p>
+          <p class="muted">${esc(partRange(dp))}</p>
+          <p><b>${pctSmall(part.share)}</b> of ${esc(your)} listening · ${plural(part.plays, "play")}</p>
+          ${part.artist ? `<p class="muted">Top artist: ${esc(part.artist)}</p>` : ""}</div></div>${list}</div>`;
+  }).join("")}</div>`;
+}
+
+document.addEventListener("click", e => {
+  const el = e.target.closest("#insights-body [data-part]");
+  if (!el || !clockData) return;
+  clockPart = +el.dataset.part;
+  document.querySelectorAll(".dp-tabs [data-part]").forEach(b => b.setAttribute("aria-selected", String(+b.dataset.part === clockPart)));
+  $("clock-body").innerHTML = clockBody();
+});
+
+// song popup: what time of day it gets played
+const DP_NAMES = [["😈", "Demon hours"], ["👻", "Ghost hours"], ["🌅", "Sunrise"], ["☕", "Coffee hours"],
+                  ["🍜", "Lunch break"], ["🌤️", "Afternoon drift"], ["🌇", "Golden hour"], ["🌙", "Night drive"]];
+function hoursSection(d) {
+  const h = d.hours || [], total = h.reduce((a, b) => a + b, 0);
+  if (total < 3) return "";
+  const blocks = DP_NAMES.map((_, b) => h[3 * b] + h[3 * b + 1] + h[3 * b + 2]);
+  const best = blocks.indexOf(Math.max(...blocks)), share = blocks[best] / total;
+  const [emoji, name] = DP_NAMES[best];
+  const range = `${hourName(best * 3)}–${hourName(best * 3 + 3)}`;
+  const max = Math.max(...h), W = 600, H = 90, bw = W / 24;
+  const bars = h.map((v, i) => `<rect x="${(i * bw + 1.5).toFixed(1)}" y="${(H - 18 - (H - 24) * v / max).toFixed(1)}"
+    width="${(bw - 3).toFixed(1)}" height="${((H - 24) * v / max).toFixed(1)}" rx="2"
+    class="${Math.floor(i / 3) === best ? "hb on" : "hb"}"><title>${hourName(i)}: ${plural(v, "play")}</title></rect>`).join("");
+  const ticks = [0, 6, 12, 18].map(i => `<text x="${(i * bw + 2).toFixed(1)}" y="${H - 3}">${hourName(i)}</text>`).join("");
+  const kind = d.kind === "track" ? "song" : d.kind;
+  return `<section class="hours"><h3>When it gets played</h3>
+    <p>${share >= 0.3 ? `Mostly a <b>${emoji} ${esc(name)}</b> ${kind}` : `Played all day, most during <b>${emoji} ${esc(name)}</b>`}:
+      ${pct(share)} of plays are ${esc(range)}.</p>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Plays by hour of the day">${bars}${ticks}</svg></section>`;
+}

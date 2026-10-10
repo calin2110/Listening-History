@@ -368,3 +368,26 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .era-tip b,.era-tip span,.era-tip small{display:block}
 .era-tip small{opacity:.75;margin-top:2px}
 @media (prefers-reduced-motion:reduce){.ec{transition:none}.ec[data-tip]:hover{transform:none}}
+
+/* ---- around the clock ---- */
+.dp-tabs{flex-wrap:wrap;margin-bottom:14px}
+.clock-card{min-width:0}
+.clock-top{display:grid;grid-template-columns:minmax(180px,250px) 1fr;gap:16px;align-items:center;margin-bottom:10px}
+.clock-top p{margin:0 0 4px}
+.clock-name{font-size:1.35rem;font-weight:800}
+.radial{width:100%;height:auto;overflow:visible}
+.radial path{cursor:pointer;transition:opacity .15s}
+.radial path:hover{opacity:.85}
+.rc-guide{fill:none;stroke:var(--line);stroke-dasharray:2 3}
+.rc-emoji{font-size:15px;cursor:pointer;opacity:.55}
+.rc-emoji.on{opacity:1;font-size:19px}
+.rc-hour{font-size:9px;fill:var(--muted);font-family:var(--font)}
+.clock-slide .radial{width:min(300px,70vw)}
+.clock-slide .rc-guide{stroke:rgba(255,255,255,.35)}
+.clock-slide .rc-hour{fill:rgba(255,255,255,.8)}
+.hours svg{width:100%;height:auto;display:block}
+.hours p{margin:0 0 8px}
+.hours .hb{fill:var(--line)}
+.hours .hb.on{fill:var(--accent)}
+.hours text{fill:var(--muted);font-size:11px;font-family:var(--font)}
+@media (max-width:640px){.clock-top{grid-template-columns:1fr;justify-items:center;text-align:center}}
