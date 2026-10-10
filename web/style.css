@@ -475,3 +475,5 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .tune-reveal img{width:96px;height:96px;object-fit:cover;border-radius:8px;background:var(--line)}
 .tune-reveal .g-title{margin:0 0 2px}
 .tune-grid{font-size:1.15rem;line-height:1.25;margin:10px auto;letter-spacing:2px}
+.g-head-row{display:flex;flex-wrap:wrap;justify-content:center;gap:4px 18px}
+.g-head-row .g-who{margin-bottom:10px}

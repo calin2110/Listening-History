@@ -305,17 +305,39 @@ async function startTune() {
   game.pid = state.people.includes(game.pid) ? game.pid : state.people[0];
   gameBox().innerHTML = `<p class="muted">Picking songs…</p>`;
   try {
-    const all = await poolFor(game.pid, 400);                // suggestions: everything you've played a bit
+    const all = await poolFor(game.pid, 500);                // suggestions: your top 500 (the server's maximum page)
     tune.names = [...new Map(all.map(s => [normSong(s.title) + "|" + s.sub, `${s.title} — ${s.sub}`])).values()];
-    tune.pool = all.slice(0, 60);                            // answers: your top 60
+    tune.pool = all.slice(0, tunePoolSize());                // answers: your top 100-500, picked in the game
     if (tune.pool.length < 4) throw new Error("not enough songs in this time frame; pick a wider one");
     tune.round = 0; tune.score = 0; tune.results = []; tune.cur = null;
     tune.ctx ??= new (window.AudioContext || window.webkitAudioContext)();
     startLoader();
     nextTune();
   } catch (e) {
-    gameBox().innerHTML = `${pickPerson("Whose songs?")}<p class="muted">Can't start the game: ${esc(e.message)}.</p>`;
+    gameBox().innerHTML = `${tuneHeader()}<p class="muted">Can't start the game: ${esc(e.message)}.</p>`;
   }
+}
+
+// pool size (top 100-500 songs) and recently asked songs, remembered in this browser
+const TUNE_POOLS = [100, 200, 300, 500];
+function tunePoolSize() {
+  let n = 200;
+  try { n = +localStorage.getItem("music-stats-tune-pool") || 200; } catch { /* no storage */ }
+  return TUNE_POOLS.includes(n) ? n : 200;
+}
+function tuneRecent() {
+  try { return JSON.parse(localStorage.getItem("music-stats-tune-recent") || "[]"); } catch { return []; }
+}
+function rememberTune(key) {
+  const keep = Math.floor(tune.pool.length * 0.6);            // forget the oldest once most of the pool has had a turn
+  const list = [key, ...tuneRecent().filter(k => k !== key)].slice(0, Math.max(keep, 10));
+  try { localStorage.setItem("music-stats-tune-recent", JSON.stringify(list)); } catch { /* no storage */ }
+}
+function tuneHeader() {
+  const n = tunePoolSize();
+  return `<div class="g-head-row">${pickPerson("Whose songs?")}
+    <label class="g-who">From the top <select data-x="pool">${TUNE_POOLS.map(v =>
+      `<option value="${v}" ${v === n ? "selected" : ""}>${v}</option>`).join("")}</select> songs</label></div>`;
 }
 
 // background loader: 3 downloads at a time until the game has all its clips;
@@ -323,7 +345,11 @@ async function startTune() {
 // until their round starts (decoded audio is ~10 MB per song).
 function startLoader() {
   const gen = tune.gen = (tune.gen || 0) + 1;              // a new game cancels the old loader
-  Object.assign(tune, {cands: shuffle(tune.pool.slice()), ready: [], waiters: [], loaded: 0, inflight: 0});
+  // songs from your last few games go to the back of the line, so they don't come straight back
+  const recent = new Set(tuneRecent());
+  const cands = shuffle(tune.pool.slice());
+  cands.sort((a, b) => recent.has(a.key) - recent.has(b.key));
+  Object.assign(tune, {cands, ready: [], waiters: [], loaded: 0, inflight: 0});
   const wake = () => tune.waiters.splice(0).forEach(fn => fn());
   const worker = async () => {
     while (gen === tune.gen && tune.loaded + tune.inflight < tune.rounds && tune.cands.length) {
@@ -357,7 +383,7 @@ function nextClip() {
 async function nextTune() {
   stopTune();
   Object.assign(tune, {stage: 0, guesses: [], done: false, buf: null});
-  if (!tune.ready.length) gameBox().innerHTML = `${pickPerson("Whose songs?")}<p class="muted">Loading the first clips…</p>`;
+  if (!tune.ready.length) gameBox().innerHTML = `${tuneHeader()}<p class="muted">Loading the first clips…</p>`;
   const gen = tune.gen;
   while (true) {
     const clip = await nextClip();
@@ -370,7 +396,7 @@ async function nextTune() {
       return;
     } catch { /* couldn't decode: take the next one */ }
   }
-  gameBox().innerHTML = `${pickPerson("Whose songs?")}<p class="muted">Couldn't get ${tune.round ? "more " : ""}preview clips from Apple's
+  gameBox().innerHTML = `${tuneHeader()}<p class="muted">Couldn't get ${tune.round ? "more " : ""}preview clips from Apple's
     music search right now. Check your internet connection, or try again in a minute (it limits how often it can be asked).</p>
     <div class="g-actions">${tune.round ? `<button type="button" data-x="tune-done">See your score</button>` : ""}
     <button type="button" data-g="again">Try again</button></div>`;
@@ -410,7 +436,7 @@ function renderTune() {
     ${g.skip ? `Skipped at ${secs(g.len)}` : esc(g.text)}</li>`).join("");
   const won = tune.guesses.some(g => g.ok);
   const nextLen = TUNE_STAGES[s + 1];
-  gameBox().innerHTML = `${pickPerson("Whose songs?")}
+  gameBox().innerHTML = `${tuneHeader()}
     <p class="g-q">Round ${tune.round + 1} of ${tune.rounds}: name this song.</p>
     <div class="tune-stages">${stages}</div>
     <div class="tune-progress"><i></i></div>
@@ -446,7 +472,10 @@ function tuneGuess(text, skip) {
   } else {
     tune.done = true;
   }
-  if (tune.done) tune.results.push({key: tune.cur.key, title: tune.cur.title, stage: ok ? tune.stage : -1});
+  if (tune.done) {
+    tune.results.push({key: tune.cur.key, title: tune.cur.title, stage: ok ? tune.stage : -1});
+    rememberTune(tune.cur.key);
+  }
   renderTune();
   if (tune.done) playClip(30);
   else playClip();                                           // a miss plays the longer clip straight away
@@ -460,7 +489,7 @@ function finishTune() {
     TUNE_STAGES.map((_, i) => i < r.stage ? "🟥" : i === r.stage ? "🟩" : "⬜").join("")).join("\n");
   const msg = tune.score >= max * 0.75 ? "Golden ears. 👂✨" : tune.score >= max * 0.45 ? "You know your music."
     : tune.score >= max * 0.2 ? "Some of these sounded familiar…" : "Did you even listen to these? 😄";
-  tune.share = `Name that tune · ${pname(game.pid)}’s songs · ${tune.score}/${max}\n${grid}`;
+  tune.share = `Name that tune · ${pname(game.pid)}’s top ${tunePoolSize()} · ${tune.score}/${max}\n${grid}`;
   gameBox().innerHTML = `<div class="g-final"><p class="huge">${tune.score} / ${max}</p><p class="big-line">${msg}</p>
     <pre class="tune-grid">${esc(grid)}</pre>
     <p class="g-score">Best ${bestScore(key)} / ${max}</p>
@@ -578,6 +607,10 @@ function finishMonth() {
 
 $("game-stage").addEventListener("change", e => {
   if (e.target.dataset.x === "person") { game.pid = +e.target.value; newGame(); }
+  if (e.target.dataset.x === "pool") {
+    try { localStorage.setItem("music-stats-tune-pool", e.target.value); } catch { /* no storage */ }
+    newGame();
+  }
 });
 $("game-stage").addEventListener("submit", e => {
   if (!e.target.matches("[data-x='tune-form']")) return;
