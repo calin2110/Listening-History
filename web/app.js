@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const state = {
   frame: "all", from: "", to: "", q: "", sort: "total", min: 20, decay: 0, size: 48, page: 1,
   people: [], weights: {}, by: "plays", common: true, formula: "entropy", norm: false,   // multi-person
-  level: "track", view: "top", gap: 365, minplay: true,
+  level: "track", view: "top", gap: 365, minplay: true, era: "month",
 };
 let META = {people: [], years: []}, items = [], lastData = null, ctrl = null;
 
@@ -430,10 +430,13 @@ async function loadInsights() {
   const body = $("insights-body");
   body.style.opacity = ".5";
   try {
-    const r = await fetch("/api/insights?" + new URLSearchParams(baseParams()), {signal: mine.signal});
-    const d = await r.json();
+    const q = new URLSearchParams(baseParams());
+    const [r, rf] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
+                                       fetch("/api/fun?" + new URLSearchParams({...baseParams(), era: state.era}),
+                                             {signal: mine.signal})]);
+    const [d, f] = await Promise.all([r.json(), rf.json()]);
     if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
-    body.innerHTML = renderInsights(d);
+    body.innerHTML = renderInsights(d, rf.ok ? f : null);
     body.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
   } catch (e) {
     if (e.name === "AbortError") return;
@@ -453,13 +456,14 @@ function streakWhen(s) {
     : `${day(a)} ${time(a)} to ${day(b)} ${time(b)}`;
 }
 
-function renderInsights(d) {
+function renderInsights(d, f) {
   const parts = [];
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
   if (d.compat?.length) {
     parts.push(`<div><h3>How compatible are you? <span class="muted">${esc(scope)}</span></h3>
       ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`);
   }
+  if (f && typeof renderFunSections === "function") parts.push(...renderFunSections(f));
 
   const streakList = (list, kind) => list.length
     ? `<ul class="streaks">${list.slice(0, 5).map(s => `<li><b>×${s.len}</b><span>${esc(s.title)}
@@ -592,7 +596,7 @@ function animateCompat(card) {
 // ------------------------------------------------------------- URL state --
 function writeHash() {
   const h = {f: state.frame, q: state.q, s: state.sort, m: state.min, d: state.decay, n: state.size, p: state.page,
-             lv: state.level, v: state.view, g: state.gap, mp: state.minplay ? 1 : 0};
+             lv: state.level, v: state.view, g: state.gap, mp: state.minplay ? 1 : 0, er: state.era};
   if (state.frame === "custom") Object.assign(h, {from: state.from, to: state.to});
   if (META.people.length > 1) {
     Object.assign(h, {ppl: state.people.join(","), w: state.people.map(weight).join(","),
@@ -616,6 +620,7 @@ function readHash() {
   if (h.get("v")) state.view = h.get("v");
   if (GAPS[+h.get("g")]) state.gap = +h.get("g");
   if (h.has("mp")) state.minplay = h.get("mp") !== "0";
+  if (["day", "month", "quarter", "half", "year"].includes(h.get("er"))) state.era = h.get("er");
 
   const n = META.people.length;
   const ppl = (h.get("ppl") || "").split(",").filter(x => x !== "").map(Number)

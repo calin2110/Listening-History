@@ -67,6 +67,10 @@
 
     <div class="totals" id="totals" aria-live="polite"></div>
     <div class="split big" id="bigsplit"></div>
+    <div class="funbar">
+      <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
+      <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
+    </div>
   </header>
 
   <details class="insights" id="insights">
@@ -122,8 +126,24 @@
   <div class="dlg-body" id="dlg-body"></div>
 </dialog>
 
+<dialog id="recap" class="recap" aria-label="Your recap">
+  <div class="recap-bars" id="recap-bars"></div>
+  <button type="button" class="recap-x" id="recap-close" aria-label="Close recap">×</button>
+  <div class="recap-stage" id="recap-stage" aria-live="polite"></div>
+</dialog>
+
+<dialog id="game" class="game" aria-labelledby="game-title">
+  <div class="dlg-head">
+    <h2 id="game-title">Games</h2>
+    <div class="tabs" id="game-modes" role="tablist" aria-label="Game"></div>
+    <button type="button" class="close" id="game-close" aria-label="Close">×</button>
+  </div>
+  <div class="game-stage" id="game-stage"></div>
+</dialog>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
+<script src="fun.js"></script>
 </body>
 </html>

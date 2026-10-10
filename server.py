@@ -34,11 +34,15 @@ API (all GET, JSON unless noted). Common parameters:
   /api/detail     ?k=<key>: timeline, per-person stats and (for artists and
                   albums) top tracks of one item
   /api/insights   taste match, streaks, listening clock, places
+  /api/fun        per person: badges, top songs/artists, biggest day, longest
+                  streak and the top song of each period ("eras"); era=day|month|
+                  quarter|half|year (default month)
   /api/cover      ?k=<key>: 302 redirect to the cover image (cached)
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
 """
 
 import argparse
+import array
 import bisect
 import csv
 import glob
@@ -385,9 +389,11 @@ class Library:
                 if gid >= 0:
                     self.ever[name][pid].add(gid)
 
-        # hour of the week (Mon 0:00 = 0 ... Sun 23:00 = 167) per play, in local time
+        # per play, in local time: hour of the week (Mon 0:00 = 0 ... Sun 23:00 = 167)
+        # and the calendar day (as a date ordinal)
         zones = {}
         self.how = bytearray(len(self.raw))
+        self.lday = array.array("i", bytes(4 * len(self.raw)))
         for i, (t, _, _, src, _, _, _, tzname) in enumerate(self.raw):
             if not t:
                 self.how[i] = 255
@@ -395,6 +401,7 @@ class Library:
             if src == TIDAL and self.tidal_local:
                 d = datetime.fromtimestamp(t, timezone.utc)          # already local, kept as-is
                 self.how[i] = d.weekday() * 24 + d.hour
+                self.lday[i] = d.toordinal()
                 continue
             z = None
             if tzname and tzname not in zones:
@@ -413,12 +420,9 @@ class Library:
             if tzname:
                 z = zones[tzname]
             z = z or self.tz
-            if z:
-                d = datetime.fromtimestamp(t, z)
-                self.how[i] = d.weekday() * 24 + d.hour
-            else:
-                lt = time.localtime(t)
-                self.how[i] = lt.tm_wday * 24 + lt.tm_hour
+            d = datetime.fromtimestamp(t, z) if z else datetime.fromtimestamp(t)   # else: this computer's zone
+            self.how[i] = d.weekday() * 24 + d.hour
+            self.lday[i] = d.toordinal()
 
         self.person_stats = [{"name": nm, "plays": 0, "first": None, "last": None, "last_ts": 0.0}
                              for nm in self.people]
@@ -434,6 +438,7 @@ class Library:
         self.aggregate = lru_cache(maxsize=64)(self._aggregate)
         self.level_agg = lru_cache(maxsize=64)(self._level_agg)
         self.insights = lru_cache(maxsize=32)(self._insights)
+        self.fun = lru_cache(maxsize=32)(self._fun)
         self.match = lru_cache(maxsize=32)(self._match)
 
     # -------------------------------------------------------- aggregation --
@@ -844,6 +849,150 @@ class Library:
                 })
         out.sort(key=lambda c: -c["overall"])
         return out
+
+    # ---------------------------------------------------------------- fun --
+    # Badges: (id, name, emoji, test on the person's stats, description of the number)
+    BADGES = [
+        ("night_owl", "Night owl", "🦉", lambda s: s["night"] >= 0.15,
+         lambda s: f"{s['night']:.0%} of your listening happens between midnight and 5 am"),
+        ("early_bird", "Early bird", "🌅", lambda s: s["morning"] >= 0.2,
+         lambda s: f"{s['morning']:.0%} of your listening happens between 5 and 9 am"),
+        ("weekend", "Weekend warrior", "🎉", lambda s: s["weekend"] >= 0.4,
+         lambda s: f"{s['weekend']:.0%} of your listening happens on weekends (2 days out of 7 would be 29%)"),
+        ("office", "Office soundtrack", "💼", lambda s: s["work"] >= 0.5,
+         lambda s: f"{s['work']:.0%} of your listening is on weekdays between 9 and 5"),
+        ("loyalist", "Loyalist", "💍", lambda s: s["top10"] >= 0.3,
+         lambda s: f"Your top 10 songs are {s['top10']:.0%} of everything you played"),
+        ("explorer", "Explorer", "🧭", lambda s: s["songs"] >= 1000 or (s["variety"] >= 0.4 and s["plays"] >= 100),
+         lambda s: f"{s['songs']:,} different songs in {s['plays']:,} plays"),
+        ("superfan", "Superfan", "⭐", lambda s: s["top_artist_share"] >= 0.2,
+         lambda s: f"{s['top_artist']} is {s['top_artist_share']:.0%} of your listening"),
+        ("repeat", "On repeat", "🔁", lambda s: s["streak"] >= 5,
+         lambda s: f"You played {s['streak_song']} {s['streak']} times in a row"),
+        ("marathon", "Marathoner", "🏃", lambda s: s["best_day_ms"] >= 8 * 3600000,
+         lambda s: f"{s['best_day_ms'] / 3600000:.1f} hours of music on {s['best_day']}"),
+        ("skipper", "Restless thumb", "⏭️", lambda s: s["skip_n"] >= 50 and s["skip_rate"] >= 0.25,
+         lambda s: f"You skip {s['skip_rate']:.0%} of songs"),
+        ("patient", "Hears it out", "🧘", lambda s: s["skip_n"] >= 50 and s["skip_rate"] <= 0.05,
+         lambda s: f"You skip only {s['skip_rate']:.0%} of songs"),
+    ]
+
+    ERA_UNITS = ("day", "month", "quarter", "half", "year")
+
+    @staticmethod
+    def _era_start(day, unit):
+        """First day (as a date ordinal) of the era period that a day falls in."""
+        d = datetime.fromordinal(day)
+        if unit == "day":
+            return day
+        if unit == "year":
+            return d.replace(month=1, day=1).toordinal()
+        size = {"month": 1, "quarter": 3, "half": 6}[unit]
+        return d.replace(month=(d.month - 1) // size * size + 1, day=1).toordinal()
+
+    def _fun(self, lo_ts, hi_ts, sel, minplay_ms, era="month"):
+        """Per person: highlights, badges and the top song of each period ("eras")."""
+        era = era if era in self.ERA_UNITS else "month"
+        lo, hi = self._span(lo_ts, hi_ts)
+        selset = set(sel)
+        artist_of = self.levels["artist"].of_track
+        art = self.levels["artist"]
+        st = {pid: {"ms": 0, "plays": 0, "tracks": Counter(), "artists": Counter(), "night": 0, "morning": 0,
+                    "weekend": 0, "work": 0, "days": Counter(), "day_track": Counter(), "skips": 0, "skip_n": 0,
+                    "run": [None, 0], "streak": (0, None)} for pid in sel}
+        periods = defaultdict(Counter)                         # (person, first day of period) -> track -> ms
+        period_of = {}                                         # day -> first day of its period
+        for i in range(lo, hi):
+            t, tid, pid, src, ms, skipped, _, _ = self.raw[i]
+            if pid not in selset:
+                continue
+            s = st[pid]
+            if skipped is not None:
+                s["skip_n"] += 1
+                s["skips"] += skipped
+            if ms < minplay_ms or not t:
+                continue
+            s["ms"] += ms
+            s["plays"] += 1
+            s["tracks"][tid] += ms
+            s["artists"][artist_of[tid]] += ms
+            h = self.how[i]
+            if h != 255:
+                hour, wd = h % 24, h // 24
+                s["night"] += ms if hour < 5 else 0
+                s["morning"] += ms if 5 <= hour < 9 else 0
+                s["weekend"] += ms if wd >= 5 else 0
+                s["work"] += ms if wd < 5 and 9 <= hour < 17 else 0
+            day = self.lday[i]
+            if day:
+                s["days"][day] += ms
+                s["day_track"][(day, tid)] += 1
+                start = period_of.get(day)
+                if start is None:
+                    start = period_of[day] = self._era_start(day, era)
+                periods[(pid, start)][tid] += ms
+            run = s["run"]
+            run[1] = run[1] + 1 if run[0] == tid else 1
+            run[0] = tid
+            if run[1] > s["streak"][0]:
+                s["streak"] = (run[1], tid)
+
+        def song(tid, **extra):
+            artist, title = self.display[tid]
+            return {"key": self.keys[tid], "title": title, "sub": artist, "cover_key": self.keys[tid], **extra}
+
+        def day_str(o):
+            return datetime.fromordinal(o).strftime("%Y-%m-%d")
+
+        people = []
+        for pid in sel:
+            s = st[pid]
+            total = s["ms"] or 1
+            top_art = s["artists"].most_common(1)
+            best_day = s["days"].most_common(1)
+            stats = {
+                "plays": s["plays"], "songs": len(s["tracks"]),
+                "night": s["night"] / total, "morning": s["morning"] / total,
+                "weekend": s["weekend"] / total, "work": s["work"] / total,
+                "top10": sum(v for _, v in s["tracks"].most_common(10)) / total,
+                "variety": len(s["tracks"]) / max(s["plays"], 1),
+                "top_artist": art.title[top_art[0][0]] if top_art else "",
+                "top_artist_share": top_art[0][1] / total if top_art else 0.0,
+                "streak": s["streak"][0],
+                "streak_song": self.display[s["streak"][1]][1] if s["streak"][1] is not None else "",
+                "best_day": (lambda d: f"{d.day} {d:%b %Y}")(datetime.fromordinal(best_day[0][0])) if best_day else "",
+                "best_day_ms": best_day[0][1] if best_day else 0,
+                "skip_n": s["skip_n"], "skip_rate": s["skips"] / s["skip_n"] if s["skip_n"] else 0.0,
+            }
+            badges = [{"id": b[0], "name": b[1], "emoji": b[2], "text": b[4](stats)}
+                      for b in self.BADGES if s["plays"] and b[3](stats)]
+            out = {
+                "pid": pid, "ms": s["ms"], "plays": s["plays"], "songs": len(s["tracks"]),
+                "artists": len(s["artists"]), "days": len(s["days"]),
+                "top_songs": [song(tid, ms=ms) for tid, ms in s["tracks"].most_common(5)],
+                "top_artists": [{"key": art.keys[a], "title": art.title[a], "sub": "",
+                                 "cover_key": self.keys[max(art.members[a], key=lambda t: s["tracks"].get(t, 0))],
+                                 "ms": ms} for a, ms in s["artists"].most_common(5)],
+                "badges": badges, "stats": {k: v for k, v in stats.items() if not isinstance(v, str)},
+                "best_day": None, "repeat_day": None, "streak": None,
+                "eras": [song(periods[k].most_common(1)[0][0], start=day_str(k[1]),
+                              ms=periods[k].most_common(1)[0][1])
+                         for k in sorted(k for k in periods if k[0] == pid)],
+            }
+            if best_day:
+                d0 = best_day[0][0]
+                day_songs = Counter({tid: n for (d, tid), n in s["day_track"].items() if d == d0})
+                out["best_day"] = {"date": day_str(d0), "ms": best_day[0][1],
+                                   "songs": sum(1 for _ in day_songs),
+                                   "top": song(day_songs.most_common(1)[0][0]) if day_songs else None}
+            if s["day_track"]:
+                (d1, tid), n = s["day_track"].most_common(1)[0]
+                out["repeat_day"] = song(tid, date=day_str(d1), plays=n)
+            if s["streak"][1] is not None and s["streak"][0] >= 2:
+                out["streak"] = song(s["streak"][1], len=s["streak"][0])
+            people.append(out)
+
+        return {"people": people, "era": era}
 
     # ----------------------------------------------------------- insights --
     def _insights(self, lo_ts, hi_ts, sel, by, half_s, ref, minplay_ms):
@@ -1398,7 +1547,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
-                "/api/detail": self.api_detail, "/api/insights": self.api_insights,
+                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -1480,6 +1629,11 @@ class Handler(BaseHTTPRequestHandler):
         if d is None:
             return self.send_json({"error": "Unknown item"}, 404)
         self.send_json(d)
+
+    def api_fun(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.fun(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                    int(c["minplay_s"] * 1000), qs.get("era", "month")))
 
     def api_insights(self, qs):
         c = self.common(qs)
