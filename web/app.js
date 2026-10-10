@@ -59,7 +59,13 @@ function bar(parts) {
   const t = parts.reduce((a, [v]) => a + v, 0) || 1;
   return parts.map(([v, c]) => `<i style="width:${v / t * 100}%;--c:${c}"></i>`).join("");
 }
-const sourceBar = (sp, td) => bar([[sp, "var(--spotify)"], [td, "var(--tidal)"]]);
+// streaming services: [key in the API, name, bar color]
+const SOURCES = [["spotify", "Spotify", "var(--spotify)"], ["tidal", "Tidal", "var(--tidal)"],
+                 ["apple", "Apple Music", "var(--apple)"]];
+const present = () => SOURCES.filter(([k]) => (META.sources || ["spotify", "tidal"]).includes(k));
+const sourceBar = r => bar(present().map(([k, , c]) => [r[k] || 0, c]));
+const sourceSplit = r => present().filter(([k]) => r[k]).map(([k, n]) => `${n} ${fmt(r[k])}`).join(" / ");
+const sourceTotal = r => SOURCES.reduce((a, [k]) => a + (r[k] || 0), 0);
 function measure(p) {
   if (!p) return 0;
   return state.by === "plays" ? p.plays : state.by === "minutes" ? p.ms / 60000 : p.score;
@@ -145,9 +151,10 @@ function sortOptions() {
   const opts = joint()
     ? [["joint", "Joint score"], ...state.people.map(pid => ["p" + pid, `Most ${BY_LABEL[state.by]} by ${pname(pid)}`]),
        ["score", "Top points (with decay), combined"], ["total", "Most time, combined"]]
-    : [["score", "Top score (with decay)"], ["total", "Most played (both)"]];
+    : [["score", "Top score (with decay)"], ["total", "Most time listened"]];
   if (state.view === "top") opts.push(["climb", "Biggest climbers"]);
-  opts.push(["spotify", "Most played on Spotify"], ["tidal", "Most played on Tidal"], ["plays", "Most plays"],
+  if (present().length > 1) present().forEach(([k, n]) => opts.push([k, "Most played on " + n]));
+  opts.push(["plays", "Most plays"],
             ["last", "Recently played"], ["skip_hi", "Most skipped"], ["skip_lo", "Least skipped"]);
   if (state.level === "track") opts.push(["artist", "Artist A–Z"], ["title", "Song A–Z"]);
   else if (state.level === "album") opts.push(["artist", "Artist A–Z"], ["title", "Album A–Z"]);
@@ -280,7 +287,7 @@ async function load() {
 function render(d) {
   lastData = d;
   const t = d.totals, sel = d.people, isJoint = sel.length > 1;
-  const total = t.spotify + t.tidal;
+  const total = sourceTotal(t);
 
   if (!t.tracks) {
     $("totals").innerHTML = "";
@@ -292,11 +299,10 @@ function render(d) {
   } else {
     $("totals").innerHTML =
       `<span><b>${hours(total)}</b> across <b>${t.tracks.toLocaleString()}</b> ${noun()} and ${t.plays.toLocaleString()} plays</span>` +
-      `<span class="legend" style="--c:var(--spotify)">Spotify ${hours(t.spotify)}</span>` +
-      `<span class="legend" style="--c:var(--tidal)">Tidal ${hours(t.tidal)}</span>` +
+      present().filter(([k]) => t[k]).map(([k, n, c]) => `<span class="legend" style="--c:${c}">${n} ${hours(t[k])}</span>`).join("") +
       (decayOn() ? `<span>Score <b>${pts(t.score)}</b></span>` : "");
   }
-  $("bigsplit").innerHTML = isJoint ? bar(sel.map((pid, j) => [t.people[j].ms, color(pid)])) : sourceBar(t.spotify, t.tidal);
+  $("bigsplit").innerHTML = isJoint ? bar(sel.map((pid, j) => [t.people[j].ms, color(pid)])) : sourceBar(t);
 
   $("decay-note").textContent = decayOn()
     ? `A minute played ${DECAY[state.decay][1]} before ${niceDay(d.ref)} counts half as much, ` +
@@ -381,11 +387,11 @@ function card(r, i, d) {
     stats = `<div class="time">${decayOn()
         ? `<b>${pts(r.score)} pts</b><span>${fmt(r.total)}</span>`
         : `<b>${fmt(r.total)}</b><span>${r.plays.toLocaleString()} plays</span>`}</div>
-      <div class="split" title="Spotify ${fmt(r.spotify)} / Tidal ${fmt(r.tidal)}">${sourceBar(r.spotify, r.tidal)}</div>`;
+      <div class="split" title="${esc(sourceSplit(r))}">${sourceBar(r)}</div>`;
   }
   let line = "";
   if (state.sort === "skip_hi" || state.sort === "skip_lo") {
-    line = r.skip_n ? `Skipped ${pct(r.skips / r.skip_n)} of ${r.skip_n.toLocaleString()} Spotify plays` : "No skip data (Tidal only)";
+    line = r.skip_n ? `Skipped ${pct(r.skips / r.skip_n)} of ${r.skip_n.toLocaleString()} plays` : "No skip data (Tidal only)";
   } else if (state.view === "rediscover") {
     line = `Last played ${niceDay(r.last)}`;
   }
@@ -446,6 +452,7 @@ function streakWhen(s) {
     ? `${day(a)}, ${time(a)}–${time(b)}`
     : `${day(a)} ${time(a)} to ${day(b)} ${time(b)}`;
 }
+
 function renderInsights(d) {
   const parts = [];
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
@@ -479,7 +486,7 @@ function renderInsights(d) {
       <div class="heat">${cells}</div></div>`;
   }).join("")}</div></div>`);
 
-  // places: merge Spotify country codes and Tidal country names that mean the same country
+  // places: merge country codes (Spotify, Apple Music) and Tidal's country names for the same country
   const merged = new Map();
   d.places.forEach(p => {
     const name = placeName(p.place);
@@ -667,6 +674,7 @@ async function openDetail(item, fromStack = false) {
     (p.skip_n ? ` · skipped ${pct(p.skips / p.skip_n)}` : "") +
     (p.first ? ` · ${p.first === p.last ? niceDay(p.first) : niceDay(p.first) + " to " + niceDay(p.last)}` : "");
   const links = (d.spotify_url ? `<a href="${esc(d.spotify_url)}" target="_blank" rel="noopener">Open in Spotify</a>` : "") +
+    (d.apple_id ? `<a href="https://music.apple.com/song/${enc(d.apple_id)}" target="_blank" rel="noopener">Open in Apple Music</a>` : "") +
     (d.kind === "track" ? `<a href="https://genius.com/search?q=${enc(d.sub + " " + d.title)}" target="_blank" rel="noopener">Search on Genius</a>` : "");
   sections.push(`<section><h3>${esc(scope[0].toUpperCase() + scope.slice(1))}</h3><div class="stats">${
     d.per.map(p => `<span>${META.people.length > 1 ? `<b class="who-h" style="--c:${color(p.pid)}">${esc(pname(p.pid))}</b>: ` : ""}${p.plays ? statLine(p) : "not played"}</span>`).join("")
@@ -763,7 +771,7 @@ async function copyPlaylist() {
     if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
     const urls = d.items.map(i => i.spotify_url).filter(Boolean);
     const missing = d.items.length - urls.length;
-    if (!urls.length) { toast("None of these songs have a Spotify link (they were only played on Tidal)."); return; }
+    if (!urls.length) { toast("None of these songs have a Spotify link (they were never played on Spotify)."); return; }
     const text = urls.join("\n");
     try {
       await navigator.clipboard.writeText(text);
@@ -772,7 +780,7 @@ async function copyPlaylist() {
       document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
     }
     toast(`Copied ${urls.length} songs. In the Spotify desktop app, open a playlist and press Ctrl+V (⌘V on a Mac).` +
-          (missing ? ` ${missing} songs played only on Tidal were left out.` : ""));
+          (missing ? ` ${missing} songs never played on Spotify were left out.` : ""));
   } catch (e) {
     toast(`Couldn't copy the playlist (${e.message}).`);
   } finally {

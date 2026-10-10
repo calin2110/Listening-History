@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Local server for merged Spotify + Tidal listening history, for one or more people.
+Local server for merged Spotify, Tidal and Apple Music listening history, for one or more people.
 
     python server.py --spotify ./spotify_export --tidal ./tidal_export
     python server.py --person Alice ./alice --person Bob ./bob_spotify ./bob_tidal.csv --open
 
 Then open http://127.0.0.1:8000 in your browser.
 
-Each --person takes a name and any mix of files and folders: folders are
-searched recursively, .json files count as Spotify and .csv files as Tidal.
+Each --person takes a name and any mix of files and folders (folders are
+searched recursively). Exports are recognized by name and contents:
+  Spotify      streaming history .json files
+  Tidal        the streaming .csv (artist_name, track_title, ...)
+  Apple Music  "Apple Music Play Activity.csv", plus "Apple Music Library
+               Tracks.json" and "Apple Music - Play History Daily
+               Tracks.csv" from the same export to look up artists
 --spotify / --tidal still work for a single person (named by --name).
 Only the standard library is used.
 
@@ -24,7 +29,7 @@ API (all GET, JSON unless noted). Common parameters:
                   level=track|artist|album, view=top|rediscover|d<person id>,
                   gap (days, for rediscover), w (weights), common (0/1),
                   formula=entropy|logsum|harmonic, norm (0/1)
-                  sort: total|score|joint|spotify|tidal|plays|last|artist|title|
+                  sort: total|score|joint|spotify|tidal|apple|plays|last|artist|title|
                         p<id>|climb|skip_hi|skip_lo
   /api/detail     ?k=<key>: timeline, per-person stats and (for artists and
                   albums) top tracks of one item
@@ -37,6 +42,7 @@ import argparse
 import bisect
 import csv
 import glob
+import io
 import json
 import math
 import mimetypes
@@ -52,7 +58,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -118,6 +124,8 @@ def parse_ts(s):
     """Return a UTC epoch (float) or None. Naive times are treated as UTC."""
     if s is None:
         return None
+    if isinstance(s, (int, float)):
+        return float(s) if s > 0 else None
     s = str(s).strip()
     if not s:
         return None
@@ -155,16 +163,29 @@ def day_to_ts(s, end=False):
 
 # ------------------------------------------------------------ scoring bits --
 
-SPOTIFY, TIDAL = 0, 1
+# Streaming services. A play's source is its index here, and also the slot of
+# its milliseconds in a record, so adding a service only means adding a name.
+SOURCES = ("spotify", "tidal", "apple")
+SPOTIFY, TIDAL, APPLE = range(3)
+NSRC = len(SOURCES)
 
-# per-person record: [spotify_ms, tidal_ms, plays, score_ms, first_ts, last_ts, skips, spotify_plays_with_skip_info]
-SP_MS, TD_MS, PLAYS, SCORE, FIRST, LAST, SKIPS, SKIP_N = range(8)
+# per-person record: [ms per source..., plays, score_ms, first_ts, last_ts, skips, plays_with_skip_info]
+PLAYS, SCORE, FIRST, LAST, SKIPS, SKIP_N = range(NSRC, NSRC + 6)
+
+
+def new_rec():
+    return [0] * NSRC + [0, 0.0, math.inf, 0.0, 0, 0]
+
+
+def rec_ms(r):
+    """Total milliseconds of a record, across all services."""
+    return sum(r[:NSRC])
 
 
 def merge_rec(dst, src):
     if dst is None:
         return list(src)
-    for i in (SP_MS, TD_MS, PLAYS, SCORE, SKIPS, SKIP_N):
+    for i in (*range(NSRC), PLAYS, SCORE, SKIPS, SKIP_N):
         dst[i] += src[i]
     dst[FIRST] = min(dst[FIRST], src[FIRST])
     dst[LAST] = max(dst[LAST], src[LAST])
@@ -173,7 +194,7 @@ def merge_rec(dst, src):
 
 MEASURES = {                                       # the per-person value joint scores use
     "plays": lambda r: r[PLAYS],
-    "minutes": lambda r: (r[SP_MS] + r[TD_MS]) / 60000,
+    "minutes": lambda r: rec_ms(r) / 60000,
     "score": lambda r: r[SCORE] / 60000,           # decayed minutes ("points")
 }
 
@@ -207,7 +228,7 @@ def joint_harmonic(v, w):
 
 
 FORMULAS = {"entropy": joint_entropy, "logsum": joint_logsum, "harmonic": joint_harmonic}
-RANKABLE = {"total", "score", "joint", "spotify", "tidal", "plays"}
+RANKABLE = {"total", "score", "joint", "plays", *SOURCES}
 
 
 def cosine(a, b):
@@ -239,7 +260,7 @@ class Library:
         self.tidal_local = tidal_local
         self.people = []                               # names, index = person id
         self.key_to_id = {}
-        self.keys, self.names, self.uris, self.albums = [], [], [], []
+        self.keys, self.names, self.uris, self.albums, self.apple_ids = [], [], [], [], []
         # (ts, track_id, person_id, source, ms, skipped (1/0/None), place, time zone name)
         self.raw = []
         self.undated = 0
@@ -258,13 +279,17 @@ class Library:
             self.names.append(Counter())
             self.uris.append(None)
             self.albums.append(Counter())
+            self.apple_ids.append(None)
         return tid
 
-    def add(self, pid, ts, artist, title, ms, source, uri=None, album=None, skipped=None, place=None, tzname=None):
+    def add(self, pid, ts, artist, title, ms, source, uri=None, album=None, skipped=None, place=None,
+            tzname=None, apple_id=None):
         tid = self._track(artist, title)
         self.names[tid][(artist, title)] += ms + 1
         if uri and not self.uris[tid]:
             self.uris[tid] = uri
+        if apple_id and not self.apple_ids[tid]:
+            self.apple_ids[tid] = apple_id
         if album:
             self.albums[tid][album] += ms + 1
         t = parse_ts(ts)
@@ -372,12 +397,20 @@ class Library:
                 self.how[i] = d.weekday() * 24 + d.hour
                 continue
             z = None
-            if tzname and ZoneInfo:
-                if tzname not in zones:
+            if tzname and tzname not in zones:
+                if tzname.startswith("offset:"):           # Apple: seconds from UTC at that moment
+                    try:
+                        zones[tzname] = timezone(timedelta(seconds=int(tzname[7:])))
+                    except (ValueError, OverflowError):
+                        zones[tzname] = None
+                elif ZoneInfo:
                     try:
                         zones[tzname] = ZoneInfo(tzname)
                     except Exception:
                         zones[tzname] = None
+                else:
+                    zones[tzname] = None
+            if tzname:
                 z = zones[tzname]
             z = z or self.tz
             if z:
@@ -427,7 +460,7 @@ class Library:
                 recs = acc[tid] = [None] * n_people
             r = recs[pid]
             if r is None:
-                r = recs[pid] = [0, 0, 0, 0.0, math.inf, 0.0, 0, 0]
+                r = recs[pid] = new_rec()
             # skips are counted for every play: skipped plays are usually the short ones
             if skipped is not None:
                 r[SKIP_N] += 1
@@ -459,7 +492,7 @@ class Library:
             for i, r in enumerate(recs):
                 if r:
                     dst[i] = merge_rec(dst[i], r)
-            ms = sum(r[SP_MS] + r[TD_MS] for r in recs if r)
+            ms = sum(rec_ms(r) for r in recs if r)
             count[gid] += 1
             if ms > best_ms.get(gid, -1):
                 best_ms[gid], best[gid] = ms, tid
@@ -498,13 +531,13 @@ class Library:
             elif joint_mode and common and len(played) < len(ps):
                 not_common += 1
                 continue
-            sp = sum(p[SP_MS] for p in played)
-            td = sum(p[TD_MS] for p in played)
-            if sp + td < min_ms:
+            by_src = [sum(p[i] for p in played) for i in range(NSRC)]
+            total = sum(by_src)
+            if total < min_ms:
                 hidden += 1
                 continue
             rows.append({
-                "id": gid, "total": sp + td, "sp": sp, "td": td,
+                "id": gid, "total": total, "src": by_src,
                 "plays": sum(p[PLAYS] for p in played),
                 "first": min(p[FIRST] for p in played), "last": max(p[LAST] for p in played),
                 "score": sum(p[SCORE] for p in played) / 60000,
@@ -522,8 +555,7 @@ class Library:
             "total": lambda r: -r["total"],
             "score": lambda r: -r["score"],
             "joint": lambda r: -r["joint"],
-            "spotify": lambda r: -r["sp"],
-            "tidal": lambda r: -r["td"],
+            **{name: (lambda i: lambda r: -r["src"][i])(i) for i, name in enumerate(SOURCES)},
             "plays": lambda r: -r["plays"],
             "last": lambda r: -r["last"],
             "artist": lambda r: (lvl.sort_a[r["id"]], lvl.sort_t[r["id"]]),
@@ -617,13 +649,13 @@ class Library:
         for r in rows:
             for j, p in enumerate(r["per"]):
                 if p:
-                    per_person[j]["ms"] += p[SP_MS] + p[TD_MS]
+                    per_person[j]["ms"] += rec_ms(p)
                     per_person[j]["plays"] += p[PLAYS]
                     per_person[j]["score"] += p[SCORE] / 60000
         totals = {
             "tracks": len(rows), "hidden": hidden, "not_common": not_common,
             "plays": sum(r["plays"] for r in rows),
-            "spotify": sum(r["sp"] for r in rows), "tidal": sum(r["td"] for r in rows),
+            **{name: sum(r["src"][i] for r in rows) for i, name in enumerate(SOURCES)},
             "score": sum(r["score"] for r in rows), "people": per_person,
         }
 
@@ -650,14 +682,15 @@ class Library:
             "key": lvl.keys[gid], "kind": lvl.name, "title": lvl.title[gid], "sub": lvl.sub[gid],
             "album": self.album_name[tid] if lvl.name == "track" else None,
             "cover_key": self.keys[tid], "n_tracks": count.get(gid, 0),
-            "total": r["total"], "spotify": r["sp"], "tidal": r["td"], "plays": r["plays"],
+            "total": r["total"], **{name: r["src"][i] for i, name in enumerate(SOURCES)}, "plays": r["plays"],
             "score": round(r["score"], 2), "joint": round(r["joint"], 3),
             "first": iso_day(r["first"]), "last": iso_day(r["last"]),
             "skips": r["skips"], "skip_n": r["skip_n"],
             "rank": rank[gid], "move": mv, "new": is_new(gid),
-            "per": [{"ms": p[SP_MS] + p[TD_MS], "plays": p[PLAYS], "score": round(p[SCORE] / 60000, 2)}
+            "per": [{"ms": rec_ms(p), "plays": p[PLAYS], "score": round(p[SCORE] / 60000, 2)}
                     if p else None for p in r["per"]],
             "spotify_url": f"https://open.spotify.com/track/{uri.split(':')[-1]}" if uri else None,
+            "apple_id": self.apple_ids[tid] if lvl.name == "track" else None,
         }
 
     # -------------------------------------------------------- taste match --
@@ -753,6 +786,7 @@ class Library:
             out["cover_key"] = self.keys[tid]
             uri = self.uris[tid]
             out["spotify_url"] = f"https://open.spotify.com/track/{uri.split(':')[-1]}" if uri else None
+            out["apple_id"] = self.apple_ids[tid]
         else:
             ranked = sorted(top.items(), key=lambda kv: -kv[1][0])
             out["cover_key"] = self.keys[ranked[0][0]] if ranked else self.keys[lvl.members[gid][0]]
@@ -910,6 +944,7 @@ class Library:
             "first": iso_day(dated[0]) if dated else None,
             "last": iso_day(dated[-1]) if dated else None,
             "years": years,
+            "sources": [SOURCES[i] for i in sorted({p[3] for p in self.raw})],
             "people": [{k: v for k, v in ps.items() if k != "last_ts"} for ps in self.person_stats],
             "tracks": len(self.keys),
             "artists": len(self.levels["artist"].keys),
@@ -920,28 +955,96 @@ class Library:
 
 
 # ----------------------------------------------------------------- loading --
+#
+# Everything is read through "entries": plain files, given directly or found in
+# folders (searched recursively). Each export is recognized by its file name
+# and CSV header, so a person's paths can be any mix of Spotify, Tidal and
+# Apple Music exports.
 
-def expand_paths(paths, ext):
-    out = []
-    for p in paths:
-        if os.path.isdir(p):
-            out += sorted(glob.glob(os.path.join(p, "**", f"*{ext}"), recursive=True))
-        else:
-            out += sorted(glob.glob(p)) or [p]
-    return out
+class Entry:
+    def __init__(self, path):
+        self.label = path                              # shown in messages
+        self.base = os.path.basename(path).lower()
 
+    def open(self):
+        return open(self.label, "rb")
 
-def load_spotify(paths, lib, pid):
-    files, n = expand_paths(paths, ".json"), 0
-    for f in files:
+    def text(self):
+        return io.TextIOWrapper(self.open(), encoding="utf-8-sig", newline="")
+
+    def header(self):
         try:
-            with open(f, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, json.JSONDecodeError) as e:
-            print(f"  ! skipping {f}: {e}", file=sys.stderr)
+            with self.text() as fh:
+                return next(csv.reader(fh), [])
+        except (OSError, UnicodeDecodeError, csv.Error):
+            return []
+
+
+def iter_entries(paths):
+    for p in paths:
+        for path in sorted(glob.glob(p)) or [p]:
+            if os.path.isdir(path):
+                files = []
+                for root, _, names in os.walk(path):
+                    files += [os.path.join(root, n) for n in names]
+            else:
+                files = [path]
+            for f in sorted(files):
+                if not os.path.isfile(f):
+                    print(f"  ! not found: {f}", file=sys.stderr)
+                elif f.lower().endswith((".zip", ".tar.gz", ".tgz", ".tar")):
+                    print(f"  ! skipping archive {f}: unzip it first", file=sys.stderr)
+                else:
+                    yield Entry(f)
+
+
+APPLE_LIBRARY = "apple music library tracks.json"
+APPLE_DAILY = "apple music - play history daily tracks.csv"
+
+
+def classify(entries):
+    """Sort entries into the exports we understand; everything else is ignored."""
+    found = {"spotify": [], "tidal": [], "apple": [], "apple_library": [], "apple_daily": []}
+    for e in entries:
+        if e.base == APPLE_LIBRARY:
+            found["apple_library"].append(e)
+        elif e.base.endswith(".json"):
+            found["spotify"].append(e)
+        elif e.base == APPLE_DAILY:
+            found["apple_daily"].append(e)
+        elif e.base.endswith(".csv"):
+            head = e.header()
+            if "artist_name" in head and "track_title" in head:
+                found["tidal"].append(e)
+            elif "Song Name" in head and "Event Type" in head:
+                found["apple"].append(e)
+    return found
+
+
+def load_person(paths, lib, pid):
+    found = classify(iter_entries(paths))
+    if found["spotify"]:
+        load_spotify(found["spotify"], lib, pid)
+    if found["tidal"]:
+        load_tidal(found["tidal"], lib, pid)
+    if found["apple"]:
+        load_apple(found["apple"], found["apple_library"], found["apple_daily"], lib, pid)
+    if not (found["spotify"] or found["tidal"] or found["apple"]):
+        print("  ! no Spotify, Tidal or Apple Music history found in these paths", file=sys.stderr)
+
+
+def load_spotify(entries, lib, pid):
+    n, used = 0, 0
+    for f in entries:
+        try:
+            with f.open() as fh:
+                data = json.loads(fh.read().decode("utf-8-sig"))
+        except (OSError, ValueError) as e:
+            print(f"  ! skipping {f.label}: {e}", file=sys.stderr)
             continue
         if not isinstance(data, list):
             continue
+        before = n
         for e in data:
             if not isinstance(e, dict):
                 continue
@@ -961,13 +1064,15 @@ def load_spotify(paths, lib, pid):
                     e.get("spotify_track_uri"), e.get("master_metadata_album_album_name"),
                     skipped, f"c:{country}" if country and country != "ZZ" else None)
             n += 1
-    print(f"  Spotify: {n:,} plays from {len(files)} file(s)")
+        used += n > before
+    if n:                                              # other exports (e.g. Apple's library) are .json too
+        print(f"  Spotify: {n:,} plays from {used} file(s)")
 
 
-def load_tidal(paths, lib, pid):
-    files, n = expand_paths(paths, ".csv"), 0
-    for f in files:
-        with open(f, encoding="utf-8-sig", newline="") as fh:
+def load_tidal(entries, lib, pid):
+    n = 0
+    for f in entries:
+        with f.text() as fh:
             for row in csv.DictReader(fh):
                 artist, title = row.get("artist_name"), row.get("track_title")
                 if not artist or not title:
@@ -981,7 +1086,173 @@ def load_tidal(paths, lib, pid):
                         place=f"n:{country}" if country else None,
                         tzname=(row.get("time_zone") or "").strip() or None)
                 n += 1
-    print(f"  Tidal:   {n:,} plays from {len(files)} file(s)")
+    print(f"  Tidal:   {n:,} plays from {len(entries)} file(s)")
+
+
+# -- Apple Music
+#
+# "Apple Music Play Activity.csv" logs PLAY_START / PLAY_END events, and only
+# PLAY_END carries how long you listened. It has no artist column, so the
+# artist comes from "Apple Music Library Tracks.json" (unzip it from the
+# export's "Apple Music Library Tracks.json.zip"), then from "Apple Music -
+# Play History Daily Tracks.csv" (whose descriptions read "Artist - Song"),
+# then from apple_artists.csv, a file you can fill in yourself for whatever is
+# still missing.
+
+APPLE_CONTINUES = {"PLAYBACK_MANUALLY_PAUSED", "SCRUB_BEGIN", "PLAYBACK_SUSPENDED"}
+APPLE_SKIPS = {"TRACK_SKIPPED_FORWARDS", "MANUALLY_SELECTED_PLAYBACK_OF_A_DIFF_ITEM"}
+APPLE_OVERRIDES = "apple_artists.csv"
+APPLE_MISSING = "apple_missing_artists_{}.csv"      # per person
+
+
+def _k(s):
+    return _base_norm(s)
+
+
+class AppleArtists:
+    """Finds the artist of an Apple Music play from its song and album name."""
+
+    def __init__(self, library, daily):
+        self.by_song_album = defaultdict(Counter)      # (song, album) -> artists
+        self.by_song = defaultdict(Counter)            # song -> artists
+        self.by_album = defaultdict(Counter)           # album -> artists
+        self.daily = defaultdict(Counter)              # song -> artists (weighted by plays)
+        self.ids = {}                                  # (song, album) or song -> Apple Music track id
+        self.overrides = {}
+        for f in library:
+            try:
+                with f.open() as fh:
+                    tracks = json.loads(fh.read().decode("utf-8-sig"))
+            except (OSError, ValueError) as e:
+                print(f"  ! skipping {f.label}: {e}", file=sys.stderr)
+                continue
+            for t in tracks if isinstance(tracks, list) else []:
+                title, artist, album = t.get("Title"), t.get("Artist"), t.get("Album")
+                if not title or not artist:
+                    continue
+                self.by_song_album[(_k(title), _k(album))][artist] += 1
+                self.by_song[_k(title)][artist] += 1
+                if album:
+                    self.by_album[_k(album)][t.get("Album Artist") or artist] += 1
+                aid = t.get("Apple Music Track Identifier")
+                if aid:
+                    self.ids.setdefault((_k(title), _k(album)), str(aid))
+        for f in daily:
+            with f.text() as fh:
+                for row in csv.DictReader(fh):
+                    desc = row.get("Track Description") or ""
+                    try:
+                        plays = int(row.get("Play Count") or 1)
+                    except ValueError:
+                        plays = 1
+                    parts = desc.split(" - ")
+                    # "Artist - Song", but either side may contain " - " too: record every split
+                    for i in range(1, len(parts)):
+                        song = _k(" - ".join(parts[i:]))
+                        self.daily[song][" - ".join(parts[:i])] += plays
+                        if row.get("Track Identifier"):
+                            self.ids.setdefault(song, row["Track Identifier"])
+        if os.path.exists(APPLE_OVERRIDES):
+            with open(APPLE_OVERRIDES, encoding="utf-8-sig", newline="") as fh:
+                for row in csv.DictReader(fh):
+                    if (row.get("artist") or "").strip():
+                        self.overrides[(_k(row.get("song")), _k(row.get("album")))] = row["artist"].strip()
+
+    @staticmethod
+    def _one(counter):
+        return next(iter(counter)) if len(counter) == 1 else None
+
+    def find(self, song, album):
+        s, a = _k(song), _k(album)
+        if (s, a) in self.overrides:
+            return self.overrides[(s, a)]
+        hit = (self._one(self.by_song_album.get((s, a), ()))
+               or self._one(self.by_song.get(s, ()))
+               or self._one(self.daily.get(s, ())))
+        if hit:
+            return hit
+        # several artists have a song with this name: prefer one known for this album,
+        # then whoever this person played it from most
+        cands = Counter(self.by_song.get(s, {})) + Counter(self.daily.get(s, {}))
+        on_album = self.by_album.get(a, {})
+        for artist, _ in cands.most_common():
+            if artist in on_album:
+                return artist
+        if cands:
+            return cands.most_common(1)[0][0]
+        return self._one(self.by_album.get(a, ())) if a else None
+
+    def track_id(self, song, album):
+        return self.ids.get((_k(song), _k(album))) or self.ids.get(_k(song))
+
+
+def load_apple(entries, library, daily, lib, pid):
+    events = []
+    for f in entries:
+        with f.text() as fh:
+            for row in csv.DictReader(fh):
+                if row.get("Event Type") != "PLAY_END" or row.get("Media Type", "AUDIO") != "AUDIO":
+                    continue
+                song = row.get("Song Name")
+                if not song:
+                    continue
+                start = parse_ts(row.get("Event Start Timestamp") or row.get("Event Timestamp")
+                                 or row.get("Event End Timestamp"))
+                try:
+                    ms = max(int(float(row.get("Play Duration Milliseconds") or 0)), 0)
+                    pos = int(float(row.get("Start Position In Milliseconds") or 0))
+                except ValueError:
+                    ms, pos = 0, 0
+                events.append((start or 0.0, song, row.get("Album Name") or "", ms, pos,
+                               row.get("End Reason Type") or "", row.get("IP Country Code") or "",
+                               row.get("UTC Offset In Seconds") or ""))
+    events.sort(key=lambda e: e[0])
+
+    # Pausing or seeking ends an event, and resuming starts a new one at the same
+    # spot. Stitch those back together so one listen counts as one play.
+    plays = []
+    for e in events:
+        start, song, album, ms, pos, reason = e[:6]
+        last = plays[-1] if plays else None
+        if (last and pos > 1000 and last["song"] == song and last["album"] == album
+                and last["reason"] in APPLE_CONTINUES and 0 <= start - last["start"] < 12 * 3600):
+            last["ms"] += ms
+            last["reason"] = reason
+            continue
+        plays.append({"start": start, "song": song, "album": album, "ms": ms, "reason": reason,
+                      "country": e[6], "offset": e[7]})
+    stitched = len(events) - len(plays)
+
+    artists = AppleArtists(library, daily)
+    n, missing = 0, Counter()
+    for p in plays:
+        artist = artists.find(p["song"], p["album"])
+        if not artist:
+            missing[(p["song"], p["album"])] += 1
+            continue
+        country = p["country"].strip()
+        lib.add(pid, p["start"] or None, artist, p["song"], p["ms"], APPLE,
+                album=p["album"] or None, skipped=1 if p["reason"] in APPLE_SKIPS else 0,
+                place=f"c:{country}" if country else None,
+                tzname=f"offset:{p['offset']}" if p["offset"].lstrip("-").isdigit() else None,
+                apple_id=artists.track_id(p["song"], p["album"]))
+        n += 1
+    print(f"  Apple:   {n:,} plays from {len(entries)} file(s) "
+          f"({stitched:,} paused or seeked fragments joined into their plays)")
+    if not library:
+        print(f"  ! Apple Music Library Tracks.json not found next to the play activity: "
+              f"artists can only come from the daily tracks file", file=sys.stderr)
+    if missing:
+        total = sum(missing.values())
+        out = APPLE_MISSING.format(re.sub(r"[^\w-]+", "_", lib.people[pid]))
+        with open(out, "w", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["song", "album", "artist", "plays"])
+            for (song, album), c in missing.most_common():
+                w.writerow([song, album, "", c])
+        print(f"  ! {total:,} Apple plays ({len(missing):,} songs) skipped: artist unknown. They're listed in "
+              f"{out}; fill in the artist column, save it as {APPLE_OVERRIDES} and restart.",
+              file=sys.stderr)
 
 
 # ------------------------------------------------------------------ caches --
@@ -1047,7 +1318,13 @@ def http_json(url, retries=3, timeout=15):
     return None
 
 
-def lookup_cover(uri, artist, title):
+def lookup_cover(uri, artist, title, apple_id=None):
+    if apple_id:                                       # exact match by Apple Music track id
+        d = http_json("https://itunes.apple.com/lookup?" + urllib.parse.urlencode({"id": apple_id}),
+                      retries=1, timeout=6)
+        art = ((d or {}).get("results") or [{}])[0].get("artworkUrl100")
+        if art:
+            return art.replace("100x100bb", "600x600bb")
     if uri:
         tid = uri.split(":")[-1]
         d = http_json("https://open.spotify.com/oembed?url=" +
@@ -1231,7 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
         if not hit:
             artist, title = self.lib.display[tid]
             try:
-                url = lookup_cover(self.lib.uris[tid], artist, title)
+                url = lookup_cover(self.lib.uris[tid], artist, title, self.lib.apple_ids[tid])
             except Exception as e:
                 return self.send_json({"error": f"Cover lookup failed: {e}"}, 503, {"Cache-Control": "no-store"})
             self.covers.set(key, url)
@@ -1273,7 +1550,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--person", nargs="+", action="append", default=[], metavar=("NAME", "PATH"),
                     help="a person's name followed by their export files and/or folders "
-                         "(.json = Spotify, .csv = Tidal); repeat for each person")
+                         "(Spotify, Tidal and Apple Music are recognized automatically); "
+                         "repeat for each person")
     ap.add_argument("--spotify", nargs="*", default=[], help="Spotify JSON files and/or folders (for --name)")
     ap.add_argument("--tidal", nargs="*", default=[], help="Tidal CSV files and/or folders (for --name)")
     ap.add_argument("--name", default="Me", help="whose data --spotify/--tidal are (default: Me)")
@@ -1307,21 +1585,13 @@ def main():
     if args.spotify or args.tidal:
         pid = lib.person(args.name)
         print(f"{args.name}:")
-        if args.spotify:
-            load_spotify(args.spotify, lib, pid)
-        if args.tidal:
-            load_tidal(args.tidal, lib, pid)
+        load_person(args.spotify + args.tidal, lib, pid)
     for name, *paths in args.person:
         if not paths:
             ap.error(f"--person {name}: give at least one file or folder after the name")
         pid = lib.person(name)
         print(f"{name}:")
-        sp = [p for p in paths if os.path.isdir(p) or p.lower().endswith(".json")]
-        td = [p for p in paths if os.path.isdir(p) or p.lower().endswith(".csv")]
-        if sp:
-            load_spotify(sp, lib, pid)
-        if td:
-            load_tidal(td, lib, pid)
+        load_person(paths, lib, pid)
     t0 = time.time()
     lib.finalize()
     m = lib.meta()
