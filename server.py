@@ -2414,11 +2414,54 @@ class BadParam(ValueError):
     pass
 
 
+class ReadWriteLock:
+    """Many readers at once (stats requests), one writer alone (changing hidden artists)."""
+
+    def __init__(self):
+        self.cv = threading.Condition()
+        self.readers = 0
+        self.writing = False
+
+    def read(self):
+        lock = self
+
+        class Ctx:
+            def __enter__(self):
+                with lock.cv:
+                    while lock.writing:
+                        lock.cv.wait()
+                    lock.readers += 1
+
+            def __exit__(self, *exc):
+                with lock.cv:
+                    lock.readers -= 1
+                    lock.cv.notify_all()
+        return Ctx()
+
+    def write(self):
+        lock = self
+
+        class Ctx:
+            def __enter__(self):
+                with lock.cv:
+                    while lock.writing:
+                        lock.cv.wait()
+                    lock.writing = True              # new readers wait from here on
+                    while lock.readers:
+                        lock.cv.wait()
+
+            def __exit__(self, *exc):
+                with lock.cv:
+                    lock.writing = False
+                    lock.cv.notify_all()
+        return Ctx()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "MusicStats/2.0"
     lib = covers = lyrics = web_root = meta = None
     clips, clip_lock = OrderedDict(), threading.Lock()   # recent preview clips
-    data_lock = threading.RLock()
+    data_lock = ReadWriteLock()
     hidden_path = "hidden_artists.json"
     UNLOCKED = {"/api/cover", "/api/lyrics", "/api/preview"}   # don't touch the play data, and can be slow
     verbose = False
@@ -2455,7 +2498,10 @@ class Handler(BaseHTTPRequestHandler):
             if route:
                 if url.path in self.UNLOCKED:
                     return route(qs)
-                with Handler.data_lock:                    # don't read while hidden artists are being swapped
+                if url.path == "/api/hidden" and set(qs) & {"add", "remove", "clear"}:
+                    with Handler.data_lock.write():        # rebuilds the data: nobody reads meanwhile
+                        return route(qs)
+                with Handler.data_lock.read():             # stats requests run side by side
                     return route(qs)
             if url.path.startswith("/api/"):
                 return self.send_json({"error": "Unknown endpoint"}, 404)

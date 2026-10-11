@@ -170,6 +170,7 @@ document.addEventListener("change", async e => {
     const f = await r.json();
     if (!r.ok) throw new Error(f.error || "HTTP " + r.status);
     body.innerHTML = renderEraRows(f);
+    if (typeof ins !== "undefined" && ins.data) { ins.data[1] = f; ins.key = ins.rendered = insKey(); }
   } catch (err) {
     if (err.name !== "AbortError") body.innerHTML = `<p class="muted">Couldn't load eras (${esc(err.message)}).</p>`;
   } finally {

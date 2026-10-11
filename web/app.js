@@ -262,7 +262,7 @@ function listParams(extra = {}) {
   });
 }
 
-function refresh() { load(); if ($("insights").open) loadInsights(); }
+function refresh() { load(); if ($("insights").open) loadInsights(); else schedulePrefetch(); }
 
 async function load() {
   ctrl?.abort();
@@ -274,6 +274,7 @@ async function load() {
     if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
     state.page = d.page;
     render(d);
+    if (!$("insights").open) schedulePrefetch();                   // get Insights ready in the background
   } catch (e) {
     if (e.name === "AbortError") return;
     $("grid").innerHTML = `<li class="empty">Couldn't load ${noun()} (${esc(e.message)}). Check that server.py is still running, then reload the page.</li>`;
@@ -423,32 +424,67 @@ function renderPager(page, pages) {
 }
 
 // --------------------------------------------------------------- insights --
-let insCtrl = null;
+// Insights are fetched and built in the background as soon as the list has loaded, so
+// opening the panel is instant. Each result is keyed by everything it depends on.
+const ins = {key: null, data: null, promise: null, ctrl: null, rendered: null, timer: null};
+const insKey = () => JSON.stringify({...baseParams(), era: state.era, hidden: (META.hidden || []).map(h => h.key)});
+
+async function fetchInsights(signal) {
+  const q = new URLSearchParams(baseParams());
+  const urls = ["insights", "fun", "time", "clock", "more", "music", "albums"].map(x =>
+    `/api/${x}?` + (x === "fun" ? new URLSearchParams({...baseParams(), era: state.era}) : q));
+  const res = await Promise.all(urls.map(u => fetch(u, {signal})));
+  const json = await Promise.all(res.map(r => r.json()));
+  if (!res[0].ok) throw new Error(json[0].error || "HTTP " + res[0].status);
+  return json.map((j, i) => i === 0 || res[i].ok ? j : null);
+}
+
+function prefetchInsights() {
+  const key = insKey();
+  if (ins.key === key && ins.promise) return ins.promise;          // already done, or on its way
+  ins.ctrl?.abort();
+  const ctrl = ins.ctrl = new AbortController();
+  ins.key = key; ins.data = null;
+  ins.promise = fetchInsights(ctrl.signal).then(data => {
+    if (ins.key !== key) return null;                               // filters changed meanwhile
+    ins.data = data;
+    renderInsightsBody(key);
+    return data;
+  }).catch(e => {
+    if (ins.key === key) { ins.key = null; ins.promise = null; }   // try again next time
+    throw e;
+  });
+  ins.promise.catch(() => {});                                      // a background failure isn't an error yet
+  return ins.promise;
+}
+
+function renderInsightsBody(key) {
+  if (ins.rendered === key || !ins.data) return;
+  const [d, f, t, c, m, mu, a] = ins.data;
+  $("insights-body").innerHTML = renderInsights(d, f, t, c, m, mu, a);
+  ins.rendered = key;
+  if ($("insights").open) showInsTab(state.itab);
+  else document.querySelectorAll(".ins-group").forEach(g => { g.hidden = g.dataset.group !== state.itab; });
+}
+
+function schedulePrefetch() {                                      // wait for sliders to settle
+  clearTimeout(ins.timer);
+  ins.timer = setTimeout(() => prefetchInsights(), 400);
+}
+
 async function loadInsights() {
-  insCtrl?.abort();
-  const mine = insCtrl = new AbortController();
-  const body = $("insights-body");
+  const key = insKey(), body = $("insights-body");
+  if (ins.rendered === key) return showInsTab(state.itab);         // ready: nothing to wait for
   body.style.opacity = ".5";
   try {
-    const q = new URLSearchParams(baseParams());
-    const [r, rf, rt, rc, rm, rmu, ra] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
-                                           fetch("/api/fun?" + new URLSearchParams({...baseParams(), era: state.era}),
-                                                 {signal: mine.signal}),
-                                           fetch("/api/time?" + q, {signal: mine.signal}),
-                                           fetch("/api/clock?" + q, {signal: mine.signal}),
-                                           fetch("/api/more?" + q, {signal: mine.signal}),
-                                           fetch("/api/music?" + q, {signal: mine.signal}),
-                                           fetch("/api/albums?" + q, {signal: mine.signal})]);
-    const [d, f, t, c, m, mu, a] = await Promise.all([r, rf, rt, rc, rm, rmu, ra].map(x => x.json()));
-    if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
-    body.innerHTML = renderInsights(d, rf.ok ? f : null, rt.ok ? t : null, rc.ok ? c : null,
-                                    rm.ok ? m : null, rmu.ok ? mu : null, ra.ok ? a : null);
-    showInsTab(state.itab);
+    await prefetchInsights();
+    renderInsightsBody(key);
+    if (ins.rendered === key) showInsTab(state.itab);
   } catch (e) {
-    if (e.name === "AbortError") return;
+    if (e.name === "AbortError" || ins.key !== key) return;
     body.innerHTML = `<p class="muted">Couldn't load insights (${esc(e.message)}).</p>`;
   } finally {
-    if (insCtrl === mine) body.style.opacity = "";
+    if (insKey() === key) body.style.opacity = "";
   }
 }
 
