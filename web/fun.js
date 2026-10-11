@@ -274,6 +274,13 @@ async function personSlides(pid) {
       <p class="huge">${esc(o.title)}</p><p>${esc(o.sub)}. It started ${plural(o.times, "listening session")}.</p>
       ${L ? `<p>Longest session: ${fmt(L.ms)} and ${plural(L.songs, "song")} on ${esc(niceDay(L.start))}.</p>` : ""}</div></div>`});
   }
+  const al = (await getJSON("/api/albums?" + p0).catch(() => null))?.people?.[0];
+  if (al?.whole?.length) {
+    const w = al.whole[0];
+    slides.push({bg: c, html: `<div class="slide-split">${cover(w.cover_key, "art")}<div><p class="eyebrow">Front to back</p>
+      <p class="huge">${esc(w.title)}</p><p>${esc(w.sub)}. ${esc(you === "You" ? "You" : name)} played this album start to finish
+      ${plural(w.times, "time")}.</p></div></div>`});
+  }
   const dna = mu?.people?.[0];
   if (dna?.genres?.length) {
     const dec = dna.decades.slice().sort((a, b) => b.share - a.share)[0];

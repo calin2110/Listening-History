@@ -47,6 +47,8 @@ API (all GET, JSON unless noted). Common parameters:
                   burners, on this day; per pair: who found shared songs first
   /api/cover      ?k=<key>: 302 redirect to the cover image (cached); s=small for a thumbnail,
                   proxy=1 to get the image itself (for saving cards as images)
+  /api/albums     album habits (start to finish, complete, one-song, deep cuts) and, for 2+
+                  people, plot twists: songs/albums whose top listener isn't the artist's biggest fan
   /api/hidden     artists left out of all stats; add=<artist key> / remove=<key> / clear=1
   /api/artists    ?q=<name>: artists matching a name, for the "Hide artists" picker
   /api/music      genres, decades, nostalgia, song lengths (from music info looked up so far)
@@ -532,6 +534,7 @@ class Library:
         self.clock = lru_cache(maxsize=32)(self._clock)
         self.more = lru_cache(maxsize=16)(self._more)
         self.match = lru_cache(maxsize=32)(self._match)
+        self._albums_key = None
 
     # -------------------------------------------------------- aggregation --
     def _span(self, lo_ts, hi_ts):
@@ -1168,6 +1171,112 @@ class Library:
                 "longest_finished": [self._song(tid, duration_ms=d, plays=q["tracks"][tid]) for tid, d in longest],
             })
         return {"people": people, "progress": meta.progress()}
+
+    # ------------------------------------------------------------- albums --
+    def album_stats(self, lo_ts, hi_ts, sel, minplay_ms, meta):
+        """Album habits per person, and for 2+ people "plot twists": songs and albums whose
+        top listener isn't the person who listens to that artist the most."""
+        key = (lo_ts, hi_ts, sel, minplay_ms, meta.progress()["looked_up"])
+        if getattr(self, "_albums_key", None) == key:
+            return self._albums_val
+        lo, hi = self._span(lo_ts, hi_ts)
+        selset = set(sel)
+        alb, art = self.levels["album"], self.levels["artist"]
+        # album size: the track count from music info, or at least the different songs anyone played
+        size = {}
+        for gid, members in enumerate(alb.members):
+            known = [((meta.get(t) or {}).get("track_count") or 0) for t in members]
+            size[gid] = max(max(known, default=0), len(members))
+
+        def album_item(gid, **extra):
+            tid = max(alb.members[gid], key=lambda t: len(self.track_plays[t]))
+            return {"key": alb.keys[gid], "title": alb.title[gid], "sub": alb.sub[gid], "cover_key": self.keys[tid],
+                    "size": size[gid], **extra}
+
+        people = []
+        for pid in sel:
+            plays = defaultdict(Counter)                   # album -> track -> plays
+            runs = Counter()
+            run_album, run_tracks, run_last = None, set(), 0.0
+            for i in range(lo, hi):
+                t, tid, p, src, ms = self.raw[i][:5]
+                if p != pid or ms < minplay_ms or not t:
+                    continue
+                gid = alb.of_track[tid]
+                if gid < 0:
+                    run_album = None
+                    continue
+                plays[gid][tid] += 1
+                if gid == run_album and t - run_last <= 1800:
+                    run_tracks.add(tid)
+                else:
+                    if run_album is not None and len(run_tracks) >= max(4, 0.6 * size[run_album]):
+                        runs[run_album] += 1
+                    run_album, run_tracks = gid, {tid}
+                run_last = t
+            if run_album is not None and len(run_tracks) >= max(4, 0.6 * size[run_album]):
+                runs[run_album] += 1
+
+            whole = [album_item(g, times=n, plays=sum(plays[g].values())) for g, n in runs.most_common(8)]
+            complete, one, deep = [], [], []
+            for g, c in plays.items():
+                n, distinct, top_tid = sum(c.values()), len(c), c.most_common(1)[0][0]
+                top_share = c[top_tid] / n
+                if size[g] >= 5 and distinct / size[g] >= 0.8 and n >= 10:
+                    complete.append((distinct / size[g], n, album_item(g, heard=distinct, plays=n)))
+                if n >= 15 and size[g] >= 4 and top_share >= 0.85:
+                    artist, title = self.display[top_tid]
+                    one.append((n, album_item(g, plays=n, share=round(top_share, 3), song=title, song_key=self.keys[top_tid])))
+                if distinct >= 5:
+                    ent = -sum((v / n) * math.log(v / n) for v in c.values()) / math.log(distinct)
+                    deep.append((distinct * ent, album_item(g, heard=distinct, plays=n, top_share=round(top_share, 3),
+                                                            evenness=round(ent, 3))))
+            complete.sort(key=lambda x: (-x[0], -x[1]))
+            one.sort(key=lambda x: -x[0])
+            deep.sort(key=lambda x: -x[0])
+            people.append({"pid": pid, "whole": whole, "complete": [x[2] for x in complete[:8]],
+                           "one_song": [x[1] for x in one[:8]], "deep": [x[1] for x in deep[:8]],
+                           "albums": len(plays)})
+
+        twists = {"songs": [], "albums": []}
+        if len(sel) > 1:
+            artists, _, _ = self.level_agg("artist", lo_ts, hi_ts, 0.0, 0.0, minplay_ms)
+            fans = {}
+            for gid, recs in artists.items():
+                v = [recs[p][PLAYS] if recs[p] else 0 for p in sel]
+                tot = sum(v)
+                if tot >= 20:
+                    j = max(range(len(sel)), key=lambda k: v[k])
+                    if v[j] / tot >= 0.55:
+                        fans[gid] = (sel[j], v[j] / tot, v)
+            for level, out in (("track", "songs"), ("album", "albums")):
+                recs_by, _, _ = self.level_agg(level, lo_ts, hi_ts, 0.0, 0.0, minplay_ms)
+                lvl = self.levels[level]
+                found = []
+                for gid, recs in recs_by.items():
+                    tid = gid if level == "track" else lvl.members[gid][0]
+                    a = art.of_track[tid]
+                    if a not in fans:
+                        continue
+                    fan, fan_share, art_v = fans[a]
+                    v = [recs[p][PLAYS] if recs[p] else 0 for p in sel]
+                    tot = sum(v)
+                    if tot < (8 if level == "track" else 15):
+                        continue
+                    j = max(range(len(sel)), key=lambda k: v[k])
+                    if sel[j] == fan or v[j] / tot < 0.55:
+                        continue
+                    fan_here = v[sel.index(fan)] / tot
+                    surprise = fan_share - fan_here
+                    item = (self._song(gid) if level == "track" else album_item(gid))
+                    item.update({"artist": art.title[a], "fan": fan, "fan_share": round(fan_share, 3),
+                                 "winner": sel[j], "plays": v, "artist_plays": art_v})
+                    # twists where the fan did play it (just less) beat "never played it at all"
+                    found.append((surprise * math.log1p(tot) * (1.0 if fan_here > 0 else 0.6), item))
+                found.sort(key=lambda x: -x[0])
+                twists[out] = [x[1] for x in found[:10]]
+        self._albums_key, self._albums_val = key, {"people": people, "twists": twists}
+        return self._albums_val
 
     # -------------------------------------------------------- more angles --
     XMAS = re.compile(r"christmas|xmas|santa|jingle|sleigh|mistletoe|rudolph|navidad|weihnacht|craciun|crăciun|"
@@ -1893,9 +2002,12 @@ class AppleArtists:
                 except ValueError:
                     year = None
                 dur = t.get("Track Duration")
+                count, number = t.get("Track Count On Album"), t.get("Track Number On Album")
                 self.meta.setdefault((_k(title), _k(album)), {
                     "genre": t.get("Genre") or None, "year": year,
-                    "duration_ms": int(dur) if isinstance(dur, (int, float)) and dur > 0 else None})
+                    "duration_ms": int(dur) if isinstance(dur, (int, float)) and dur > 0 else None,
+                    "track_count": count if isinstance(count, int) and count > 0 else None,
+                    "track_no": number if isinstance(number, int) and number > 0 else None})
         for f in daily:
             with f.text() as fh:
                 for row in csv.DictReader(fh):
@@ -2141,7 +2253,8 @@ def _meta_from_itunes(r):
     year = str(r.get("releaseDate") or "")[:4]
     return {"genre": r.get("primaryGenreName") or None, "year": int(year) if year.isdigit() else None,
             "duration_ms": r.get("trackTimeMillis") or None, "preview": r.get("previewUrl") or None,
-            "apple_id": str(r["trackId"]) if r.get("trackId") else None}
+            "apple_id": str(r["trackId"]) if r.get("trackId") else None,
+            "track_count": r.get("trackCount") or None, "track_no": r.get("trackNumber") or None}
 
 
 class MetaStore:
@@ -2157,6 +2270,8 @@ class MetaStore:
             hit, old = self.cache.get(key)
             if not hit or not old:
                 self.cache.set(key, dict(m, source="library"))
+            elif any(v and not old.get(k) for k, v in m.items()):   # fill in fields added later (album sizes)
+                self.cache.set(key, {**old, **{k: v for k, v in m.items() if v and not old.get(k)}})
 
     def get(self, tid):
         return self.cache.get(self.lib.keys[tid])[1]
@@ -2334,7 +2449,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
-                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
+                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/albums": self.api_albums, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -2478,6 +2593,11 @@ class Handler(BaseHTTPRequestHandler):
                   f"({self.lib.hidden_tracks:,} songs left out, {time.time() - t0:.1f}s)")
         m = self.lib.meta()
         self.send_json({"hidden": m["hidden"], "hidden_tracks": m["hidden_tracks"]})
+
+    def api_albums(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.album_stats(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                       int(c["minplay_s"] * 1000), self.meta))
 
     def api_more(self, qs):
         c = self.common(qs)

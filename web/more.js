@@ -674,3 +674,40 @@ document.addEventListener("click", e => {
   const target = b.dataset.share === "compat" ? b.closest(".compat") : document.querySelector(b.dataset.share);
   if (target) saveImage(target, b.dataset.name || "card");
 });
+
+
+// ------------------------------------------------------------------ albums --
+function renderAlbums(a) {
+  if (!a.people.some(p => p.whole.length || p.complete.length || p.one_song.length || p.deep.length)) return "";
+  const sec = (title, note, list, row) => list.length
+    ? `<p class="sub-h">${title} <span class="muted">${note}</span></p><ol class="tt-list">${list.slice(0, 4).map(row).join("")}</ol>` : "";
+  return `<div><h3>Albums <span class="muted">how you listen to whole records</span></h3>${grid(a.people, p => {
+    const html = sec("🎧 Start to finish", "60%+ of the album in one sitting", p.whole, x =>
+        ttRow(x, `Played start to finish ${plural(x.times, "time")}`, `${esc(x.sub)} · ${plural(x.size, "song")}`))
+      + sec("✅ Completionist", "heard (almost) every song", p.complete, x =>
+        ttRow(x, x.heard >= x.size ? `Heard all ${x.size} songs` : `Heard ${x.heard} of ${x.size} songs`,
+          `${esc(x.sub)} · ${plural(x.plays, "play")}`))
+      + sec("☝️ One-song albums", "you only ever play one track", p.one_song, x =>
+        ttRow(x, `Only ever “${esc(x.song)}”`, `${pct(x.share)} of ${plural(x.plays, "play")} from a ${x.size}-song album`))
+      + sec("🔍 Deep cuts", "plays spread across the whole album", p.deep, x =>
+        ttRow(x, `${x.heard} songs in rotation`, `${esc(x.sub)} · the most played has only ${pct(x.top_share)} of the plays`));
+    return html || `<p class="muted">No album patterns here yet. Tidal's export has no album names, so its plays don't count here.</p>`;
+  })}</div>`;
+}
+
+// ------------------------------------------------------------ plot twists --
+function renderTwists(a) {
+  const t = a.twists;
+  if (!t.songs.length && !t.albums.length) return "";
+  const row = x => {
+    const fanV = x.plays[state.people.indexOf(x.fan)], winV = x.plays[state.people.indexOf(x.winner)];
+    return ttRow(x, `${esc(pname(x.winner))} ${winV} · ${esc(pname(x.fan))} ${fanV}`,
+      `${esc(pname(x.fan))} is the bigger ${esc(x.artist)} fan (${pct(x.fan_share)} of the ${esc(x.artist)} plays), yet
+       ${esc(pname(x.winner))} played this one more${fanV ? "" : `; ${esc(pname(x.fan))} never has`}.`);
+  };
+  return `<div><h3>🔀 Plot twists <span class="muted">by the artist, you’d expect the other one</span></h3>
+    <p class="muted tt-intro">For each artist, whoever plays them most is “the fan”. These are the songs and albums where someone
+      else listened more anyway.</p>
+    <div class="ins-grid">${t.songs.length ? `<div><p class="sub-h">Songs</p><ol class="tt-list">${t.songs.slice(0, 6).map(row).join("")}</ol></div>` : ""}
+      ${t.albums.length ? `<div><p class="sub-h">Albums</p><ol class="tt-list">${t.albums.slice(0, 6).map(row).join("")}</ol></div>` : ""}</div></div>`;
+}

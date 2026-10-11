@@ -431,17 +431,18 @@ async function loadInsights() {
   body.style.opacity = ".5";
   try {
     const q = new URLSearchParams(baseParams());
-    const [r, rf, rt, rc, rm, rmu] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
+    const [r, rf, rt, rc, rm, rmu, ra] = await Promise.all([fetch("/api/insights?" + q, {signal: mine.signal}),
                                            fetch("/api/fun?" + new URLSearchParams({...baseParams(), era: state.era}),
                                                  {signal: mine.signal}),
                                            fetch("/api/time?" + q, {signal: mine.signal}),
                                            fetch("/api/clock?" + q, {signal: mine.signal}),
                                            fetch("/api/more?" + q, {signal: mine.signal}),
-                                           fetch("/api/music?" + q, {signal: mine.signal})]);
-    const [d, f, t, c, m, mu] = await Promise.all([r, rf, rt, rc, rm, rmu].map(x => x.json()));
+                                           fetch("/api/music?" + q, {signal: mine.signal}),
+                                           fetch("/api/albums?" + q, {signal: mine.signal})]);
+    const [d, f, t, c, m, mu, a] = await Promise.all([r, rf, rt, rc, rm, rmu, ra].map(x => x.json()));
     if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
     body.innerHTML = renderInsights(d, rf.ok ? f : null, rt.ok ? t : null, rc.ok ? c : null,
-                                    rm.ok ? m : null, rmu.ok ? mu : null);
+                                    rm.ok ? m : null, rmu.ok ? mu : null, ra.ok ? a : null);
     showInsTab(state.itab);
   } catch (e) {
     if (e.name === "AbortError") return;
@@ -464,7 +465,7 @@ function streakWhen(s) {
 // Insights is grouped into tabs; each section goes into one group
 const INS_TABS = [["overview", "Overview"], ["habits", "Habits"], ["time", "Through time"],
                   ["music", "Your music"], ["places", "Places"]];
-function renderInsights(d, f, t, c, m, mu) {
+function renderInsights(d, f, t, c, m, mu, a) {
   const G = Object.fromEntries(INS_TABS.map(([k]) => [k, []]));
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
   const fun = f && typeof renderFunSections === "function" ? renderFunSections(f) : [];
@@ -474,6 +475,7 @@ function renderInsights(d, f, t, c, m, mu) {
     G.overview.push(`<div><h3>How compatible are you? <span class="muted">${esc(scope)}</span></h3>
       ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`);
   }
+  if (a && has("renderTwists") && state.people.length > 1) G.overview.push(renderTwists(a));
   if (has("renderAwards") && state.people.length > 1) G.overview.push(renderAwards({d, f, t, c, m, mu}));
   if (fun[0]) G.overview.push(fun[0]);                                   // listening personality
   if (m && has("renderMilestones")) G.overview.push(renderMilestones(m));
@@ -487,6 +489,7 @@ function renderInsights(d, f, t, c, m, mu) {
   if (fun[1]) G.time.push(fun[1]);                                       // eras
   if (t && has("renderTimeTravel")) G.time.push(renderTimeTravel(t));
 
+  if (a && has("renderAlbums")) G.music.push(renderAlbums(a));
   if (mu && has("renderMusic")) G.music.push(renderMusic(mu));
   if (m && has("renderLoveHate")) G.music.push(renderLoveHate(m));
 
