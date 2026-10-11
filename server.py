@@ -47,6 +47,8 @@ API (all GET, JSON unless noted). Common parameters:
                   burners, on this day; per pair: who found shared songs first
   /api/cover      ?k=<key>: 302 redirect to the cover image (cached); s=small for a thumbnail,
                   proxy=1 to get the image itself (for saving cards as images)
+  /api/hidden     artists left out of all stats; add=<artist key> / remove=<key> / clear=1
+  /api/artists    ?q=<name>: artists matching a name, for the "Hide artists" picker
   /api/music      genres, decades, nostalgia, song lengths (from music info looked up so far)
   /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
                   audio=1 returns the clip itself
@@ -324,7 +326,7 @@ class Library:
         return tid
 
     # ------------------------------------------------------------ indexing --
-    def finalize(self):
+    def finalize(self, hidden=()):
         order = sorted(range(len(self.raw)), key=lambda i: self.raw[i][0])
         self.raw = [self.raw[i] for i in order]
         self.extra = [self.extra[i] for i in order]
@@ -398,20 +400,6 @@ class Library:
             for i, k in enumerate(lvl.keys):
                 self.key_index[k] = (lvl, i)
 
-        # per track: indices into raw (for the detail popup)
-        self.track_plays = [[] for _ in range(n)]
-        for i, p in enumerate(self.raw):
-            self.track_plays[p[1]].append(i)
-
-        # who ever played what (for "discover")
-        self.ever = {name: [set() for _ in self.people] for name in self.levels}
-        for p in self.raw:
-            tid, pid = p[1], p[2]
-            for name, lvl in self.levels.items():
-                gid = lvl.of_track[tid]
-                if gid >= 0:
-                    self.ever[name][pid].add(gid)
-
         # per play, in local time: hour of the week (Mon 0:00 = 0 ... Sun 23:00 = 167)
         # and the calendar day (as a date ordinal)
         zones = {}
@@ -446,6 +434,84 @@ class Library:
             d = datetime.fromtimestamp(t, z) if z else datetime.fromtimestamp(t)   # else: this computer's zone
             self.how[i] = d.weekday() * 24 + d.hour
             self.lday[i] = d.toordinal()
+
+        # everything above covers all plays; what the stats see can leave out hidden artists
+        self.all_raw, self.all_extra, self.all_how, self.all_lday = self.raw, self.extra, self.how, self.lday
+        self.credits = self._credits()
+        self.credit_ms = Counter()                       # listening per credited artist name, hidden or not
+        for p in self.all_raw:
+            for n in self.credits[p[1]]:
+                self.credit_ms[n] += p[4]
+        self.credit_hay = {n: search_text(t) for n, t in self.credit_title.items()}
+        self.set_hidden(hidden)
+
+    # ------------------------------------------------------- hidden artists --
+    def find_artists(self, q, limit=12):
+        """Artists (including ones only ever featured) whose name contains q, most listened first."""
+        words = search_text(q).split()
+        hits = [n for n, hay in self.credit_hay.items() if all(w in hay for w in words)] if words else []
+        hits.sort(key=lambda n: -self.credit_ms[n])
+        return [{"key": "a:" + n, "title": self.credit_title[n], "ms": self.credit_ms[n],
+                 "hidden": "a:" + n in self.hidden} for n in hits[:limit]]
+
+    def is_artist_key(self, key):
+        return key.startswith("a:") and key[2:] in self.credit_title
+
+    _SPLIT = re.compile(r",|;| & | x | feat\.? | ft\.? | featuring | with ", re.I)
+    _FEAT = re.compile(r"[\(\[](?:feat|ft|with|featuring)\.?\s+([^\)\]]+)[\)\]]", re.I)
+
+    def _credits(self):
+        """Per track: every artist credited (main, co-artists, "feat." in the title), normalized.
+        Also collects how each name is usually written, for the "Hide artists" search."""
+        out, shown = [], defaultdict(Counter)
+        art = self.levels["artist"]
+        for tid in range(len(self.keys)):
+            main = self.keys[tid].split("\t")[0]
+            names = {main}
+            shown[main][art.title[art.of_track[tid]]] += 1
+            for artist, title in self.names[tid]:
+                parts = [x.strip() for x in self._SPLIT.split(artist) if x.strip()]
+                for feat in self._FEAT.findall(title):
+                    parts += [x.strip() for x in self._SPLIT.split(feat) if x.strip()]
+                for x in parts:
+                    n = norm_artist(x, True)
+                    if n:
+                        names.add(n)
+                        shown[n][x] += 1
+            out.append(frozenset(names))
+        self.credit_title = {n: c.most_common(1)[0][0] for n, c in shown.items()}
+        return out
+
+    def set_hidden(self, keys):
+        """Leave out every play of the given artists (artist keys "a:<name>"), including songs
+        they're featured on, then rebuild the indexes and clear all caches."""
+        names = {k[2:] for k in keys if k.startswith("a:")}
+        self.hidden = sorted(k for k in keys if self.is_artist_key(k))
+        drop = {tid for tid, c in enumerate(self.credits) if c & names} if names else set()
+        keep = [i for i, p in enumerate(self.all_raw) if p[1] not in drop] if drop else range(len(self.all_raw))
+        self.raw = [self.all_raw[i] for i in keep]
+        self.extra = [self.all_extra[i] for i in keep]
+        self.how = bytearray(self.all_how[i] for i in keep)
+        self.lday = array.array("i", (self.all_lday[i] for i in keep))
+        self.ts = [p[0] for p in self.raw]
+        self.hidden_tracks = len(drop)
+        self._activate()
+
+    def _activate(self):
+        n = len(self.keys)
+        # per track: indices into raw (for the detail popup)
+        self.track_plays = [[] for _ in range(n)]
+        for i, p in enumerate(self.raw):
+            self.track_plays[p[1]].append(i)
+
+        # who ever played what (for "discover")
+        self.ever = {name: [set() for _ in self.people] for name in self.levels}
+        for p in self.raw:
+            tid, pid = p[1], p[2]
+            for name, lvl in self.levels.items():
+                gid = lvl.of_track[tid]
+                if gid >= 0:
+                    self.ever[name][pid].add(gid)
 
         self.person_stats = [{"name": nm, "plays": 0, "first": None, "last": None, "last_ts": 0.0}
                              for nm in self.people]
@@ -1599,7 +1665,9 @@ class Library:
             "first": iso_day(dated[0]) if dated else None,
             "last": iso_day(dated[-1]) if dated else None,
             "years": years,
-            "sources": [SOURCES[i] for i in sorted({p[3] for p in self.raw})],
+            "sources": [SOURCES[i] for i in sorted({p[3] for p in self.all_raw})],
+            "hidden": [{"key": k, "title": self.credit_title[k[2:]]} for k in self.hidden],
+            "hidden_tracks": self.hidden_tracks,
             "people": [{k: v for k, v in ps.items() if k != "last_ts"} for ps in self.person_stats],
             "tracks": len(self.keys),
             "artists": len(self.levels["artist"].keys),
@@ -2204,6 +2272,27 @@ class MetaStore:
         m = self.fetch(tid, interactive=True)
         return m.get("preview") if m else None
 
+# --------------------------------------------------------- hidden artists --
+
+def load_hidden(path):
+    """Artist keys saved by the page's "Hide artists" list."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return [x["key"] if isinstance(x, dict) else str(x) for x in json.load(fh)]
+    except (OSError, ValueError, KeyError) as e:
+        print(f"  ! couldn't read {path}: {e}", file=sys.stderr)
+        return []
+
+
+def save_hidden(path, lib):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(lib.meta()["hidden"], fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
 # ------------------------------------------------------------------ server --
 
 class BadParam(ValueError):
@@ -2214,6 +2303,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "MusicStats/2.0"
     lib = covers = lyrics = web_root = meta = None
     clips, clip_lock = OrderedDict(), threading.Lock()   # recent preview clips
+    data_lock = threading.RLock()
+    hidden_path = "hidden_artists.json"
+    UNLOCKED = {"/api/cover", "/api/lyrics", "/api/preview"}   # don't touch the play data, and can be slow
     verbose = False
 
     def log_message(self, fmt, *args):
@@ -2242,11 +2334,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
-                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/music": self.api_music, "/api/preview": self.api_preview,
+                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
-                return route(qs)
+                if url.path in self.UNLOCKED:
+                    return route(qs)
+                with Handler.data_lock:                    # don't read while hidden artists are being swapped
+                    return route(qs)
             if url.path.startswith("/api/"):
                 return self.send_json({"error": "Unknown endpoint"}, 404)
             return self.static(url.path)
@@ -2361,6 +2456,29 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, hit[0], hit[1], {"Cache-Control": "public, max-age=86400"})
         self.send_json({"url": url})
 
+    def api_artists(self, qs):
+        self.send_json({"artists": self.lib.find_artists(qs.get("q", ""))})
+
+    def api_hidden(self, qs):
+        """?add=<artist key> / ?remove=<artist key> / ?clear=1; always returns the current list."""
+        keys = set(self.lib.hidden)
+        if qs.get("add"):
+            if not self.lib.is_artist_key(qs["add"]):
+                raise BadParam("add must be an artist key, like a:radiohead")
+            keys.add(qs["add"])
+        if qs.get("remove"):
+            keys.discard(qs["remove"])
+        if qs.get("clear") == "1":
+            keys = set()
+        if keys != set(self.lib.hidden):
+            t0 = time.time()
+            self.lib.set_hidden(keys)
+            save_hidden(Handler.hidden_path, self.lib)
+            print(f"Hidden artists: {', '.join(m['title'] for m in self.lib.meta()['hidden']) or 'none'} "
+                  f"({self.lib.hidden_tracks:,} songs left out, {time.time() - t0:.1f}s)")
+        m = self.lib.meta()
+        self.send_json({"hidden": m["hidden"], "hidden_tracks": m["hidden_tracks"]})
+
     def api_more(self, qs):
         c = self.common(qs)
         self.send_json(self.lib.more(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
@@ -2471,6 +2589,7 @@ def main():
     ap.add_argument("--covers-cache", default="covers_cache.json")
     ap.add_argument("--lyrics-cache", default="lyrics_cache.json")
     ap.add_argument("--meta-cache", default="meta_cache.json", help="genres, years, lengths, previews")
+    ap.add_argument("--hidden", default="hidden_artists.json", help="artists left out of all stats (edited from the page)")
     ap.add_argument("--no-music-info", action="store_true", help="don't look up genres/years/previews in the background")
     ap.add_argument("--strict", action="store_true",
                     help="exact name matching (don't merge 'feat.'/'Remastered'/accent variants)")
@@ -2501,12 +2620,16 @@ def main():
         print(f"{name}:")
         load_person(paths, lib, pid)
     t0 = time.time()
-    lib.finalize()
+    hidden = load_hidden(args.hidden)
+    lib.finalize(hidden)
+    Handler.hidden_path = args.hidden
     m = lib.meta()
     print(f"Indexed {m['tracks']:,} songs, {m['artists']:,} artists, {m['albums']:,} albums "
           f"in {time.time() - t0:.1f}s; history {m['first']} to {m['last']}")
     if lib.undated:
         print(f"  ! {lib.undated:,} plays had no readable date; they only count toward 'all time'")
+    if lib.hidden:
+        print(f"Hidden artists: {', '.join(h['title'] for h in m['hidden'])} ({lib.hidden_tracks:,} songs left out)")
 
     Handler.lib = lib
     Handler.covers = JsonCache(args.covers_cache)

@@ -722,7 +722,9 @@ async function openDetail(item, fromStack = false) {
   const statLine = p => `${p.plays.toLocaleString()} plays · ${fmt(p.ms)}` +
     (p.skip_n ? ` · skipped ${pct(p.skips / p.skip_n)}` : "") +
     (p.first ? ` · ${p.first === p.last ? niceDay(p.first) : niceDay(p.first) + " to " + niceDay(p.last)}` : "");
+  const akey = artistKeyOf(d);
   const links = (d.spotify_url ? `<a href="${esc(d.spotify_url)}" target="_blank" rel="noopener">Open in Spotify</a>` : "") +
+    (akey ? `<button type="button" class="linkish" data-hide="${esc(akey)}">🙈 Hide ${esc(d.kind === "artist" ? d.title : d.sub)}</button>` : "") +
     (d.apple_id ? `<a href="https://music.apple.com/song/${enc(d.apple_id)}" target="_blank" rel="noopener">Open in Apple Music</a>` : "") +
     (d.kind === "track" ? `<a href="https://genius.com/search?q=${enc(d.sub + " " + d.title)}" target="_blank" rel="noopener">Search on Genius</a>` : "");
   sections.push(`<section><h3>${esc(scope[0].toUpperCase() + scope.slice(1))}</h3><div class="stats">${
@@ -941,5 +943,80 @@ $("dlg").addEventListener("close", () => { current = null; $("dlg-body").innerHT
   } catch { /* the list request below will show the error */ }
   readHash();
   syncUI();
+  renderHiddenNote();
   load();
 })();
+
+
+// ---------------------------------------------------------- hidden artists --
+// The server leaves hidden artists out of every number; the page only edits the list.
+const artistKeyOf = d => d.kind === "artist" ? d.key : d.key?.startsWith("b:") ? "a:" + d.key.slice(2).split("\t")[0]
+  : d.key ? "a:" + d.key.split("\t")[0] : null;
+
+function renderHiddenNote() {
+  const h = META.hidden || [];
+  $("hidden-note").hidden = !h.length;
+  $("hidden-note").innerHTML = h.length ? `🙈 Hiding ${h.map(a => `<span class="chip">${esc(a.title)}<button type="button"
+    data-unhide="${esc(a.key)}" aria-label="Show ${esc(a.title)} again">×</button></span>`).join("")}
+    <span class="muted">(${META.hidden_tracks.toLocaleString()} songs left out)</span>` : "";
+  $("hide-open").textContent = h.length ? `🙈 Hidden: ${h.length}` : "🙈 Hide artists";
+}
+
+async function setHidden(params) {
+  try {
+    const d = await (await fetch("/api/hidden?" + new URLSearchParams(params))).json();
+    if (d.error) throw new Error(d.error);
+    META.hidden = d.hidden;
+    META.hidden_tracks = d.hidden_tracks;
+    const added = params.add && d.hidden.find(a => a.key === params.add);
+    if (added) toast(`Hid ${added.title}: ${d.hidden_tracks.toLocaleString()} songs left out in total. Undo with the × at the top.`);
+    renderHiddenNote();
+    renderHideList();
+    if ($("hide-q").value) searchArtists();
+    state.page = 1;
+    refresh();
+  } catch (e) {
+    toast(`Couldn't change hidden artists: ${e.message}`);
+  }
+}
+
+function renderHideList() {
+  const h = META.hidden || [];
+  $("hide-list").innerHTML = h.length ? h.map(a => `<li><span>${esc(a.title)}</span>
+      <button type="button" class="ghost small" data-unhide="${esc(a.key)}">Show again</button></li>`).join("") +
+      `<li><span></span><button type="button" class="ghost small" data-unhide-all>Show everyone again</button></li>`
+    : `<li class="muted">Nobody yet. Search above to hide someone.</li>`;
+}
+
+let hideTimer, hideCtrl;
+async function searchArtists() {
+  const q = $("hide-q").value.trim();
+  if (!q) { $("hide-results").innerHTML = ""; return; }
+  hideCtrl?.abort();
+  const mine = hideCtrl = new AbortController();
+  try {
+    const d = await (await fetch("/api/artists?q=" + enc(q), {signal: mine.signal})).json();
+    $("hide-results").innerHTML = d.artists.length ? d.artists.map(a => `<li><span>${esc(a.title)}
+      <small class="muted">${hours(a.ms)}</small></span>${a.hidden
+        ? `<button type="button" class="ghost small" data-unhide="${esc(a.key)}">Show again</button>`
+        : `<button type="button" class="ghost small" data-hide="${esc(a.key)}">Hide</button>`}</li>`).join("")
+      : `<li class="muted">No artist called “${esc(q)}”.</li>`;
+  } catch (e) {
+    if (e.name !== "AbortError") $("hide-results").innerHTML = `<li class="muted">Search failed: ${esc(e.message)}</li>`;
+  }
+}
+
+$("hide-open").addEventListener("click", () => { renderHideList(); $("hide-dlg").showModal(); $("hide-q").focus(); });
+$("hide-close").addEventListener("click", () => $("hide-dlg").close());
+$("hide-q").addEventListener("input", () => { clearTimeout(hideTimer); hideTimer = setTimeout(searchArtists, 150); });
+document.addEventListener("click", e => {
+  const add = e.target.closest("[data-hide]"), rm = e.target.closest("[data-unhide]");
+  if (add) {
+    if ($("dlg").open) $("dlg").close();                   // hidden from a song popup: that song is gone now
+    setHidden({add: add.dataset.hide});
+  } else if (rm) {
+    setHidden({remove: rm.dataset.unhide});
+  } else if (e.target.closest("[data-unhide-all]")) {
+    setHidden({clear: 1});
+  }
+});

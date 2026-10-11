@@ -38,6 +38,7 @@
       <input type="range" id="decay" min="0" max="8" step="1" value="0" aria-describedby="decay-note">
       <output id="decay-val" for="decay">Off</output>
       <label class="check"><input type="checkbox" id="minplay" checked> Ignore plays under 30 seconds</label>
+      <button type="button" class="ghost small hide-btn" id="hide-open">🙈 Hide artists</button>
       <span class="note" id="decay-note"></span>
     </div>
 
@@ -67,6 +68,7 @@
 
     <div class="totals" id="totals" aria-live="polite"></div>
     <div class="split big" id="bigsplit"></div>
+    <p class="hidden-note" id="hidden-note" hidden></p>
     <div class="funbar">
       <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
       <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
@@ -140,6 +142,20 @@
     <button type="button" class="close" id="game-close" aria-label="Close">×</button>
   </div>
   <div class="game-stage" id="game-stage"></div>
+</dialog>
+
+<dialog id="hide-dlg" class="hide-dlg" aria-labelledby="hide-title">
+  <div class="dlg-head">
+    <div><h2 id="hide-title">Hide artists</h2>
+      <p>Hidden artists are left out of everything: tops, insights, recaps and games. Songs they’re featured on too.</p></div>
+    <button type="button" class="close" id="hide-close" aria-label="Close">×</button>
+  </div>
+  <div class="hide-body">
+    <input type="search" id="hide-q" placeholder="Search for an artist…" aria-label="Search for an artist" autocomplete="off">
+    <ul class="hide-results" id="hide-results"></ul>
+    <h3>Hidden now</h3>
+    <ul class="hide-list" id="hide-list"></ul>
+  </div>
 </dialog>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
