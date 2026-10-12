@@ -688,7 +688,7 @@ class Library:
     # -------------------------------------------------------------- query --
     def query(self, frm, to, q, sort, page, size, min_ms=0, half_days=0, people=None, weights=None,
               by="plays", common=True, formula="entropy", normalize=False, level="track",
-              view="top", gap_days=365, minplay_s=0):
+              view="top", gap_days=365, minplay_s=0, cap=""):
         lvl = self.levels.get(level) or self.levels["track"]
         level = lvl.name
         sel = people or list(range(len(self.people)))
@@ -749,6 +749,22 @@ class Library:
             rows.sort(key=lambda r: (-move(r["id"]), rank[r["id"]]))
         elif sort != rank_sort:
             rows = self._ranked(rows, sort, sel, measure, lvl)
+
+        # "one song per album/artist": keep only the first (best-sorted) song of each
+        if level == "track" and cap in ("album", "artist"):
+            of = self.levels[cap].of_track
+            seen, kept = set(), []
+            for r in rows:
+                g = of[r["id"]]
+                if g >= 0 and g in seen:
+                    continue
+                if g >= 0:
+                    seen.add(g)
+                kept.append(r)
+            rows = kept
+            # ranks count only the songs that are left; movement vs. last period no longer lines up
+            rank = {gid: i + 1 for i, gid in enumerate(sorted((r["id"] for r in rows), key=rank.get))}
+            has_prev, prev_rank = False, {}
 
         per_person = [{"ms": 0, "plays": 0, "score": 0.0} for _ in sel]
         for r in rows:
@@ -1222,7 +1238,7 @@ class Library:
             if run_album is not None and len(run_tracks) >= max(4, 0.6 * size[run_album]):
                 runs[run_album] += 1
 
-            whole = [album_item(g, times=n, plays=sum(plays[g].values())) for g, n in runs.most_common(8)]
+            whole = [album_item(g, times=n, plays=sum(plays[g].values())) for g, n in runs.most_common(30)]
             complete, one, deep = [], [], []
             for g, c in plays.items():
                 n, distinct, top_tid = sum(c.values()), len(c), c.most_common(1)[0][0]
@@ -1239,8 +1255,8 @@ class Library:
             complete.sort(key=lambda x: (-x[0], -x[1]))
             one.sort(key=lambda x: -x[0])
             deep.sort(key=lambda x: -x[0])
-            people.append({"pid": pid, "whole": whole, "complete": [x[2] for x in complete[:8]],
-                           "one_song": [x[1] for x in one[:8]], "deep": [x[1] for x in deep[:8]],
+            people.append({"pid": pid, "whole": whole, "complete": [x[2] for x in complete[:30]],
+                           "one_song": [x[1] for x in one[:30]], "deep": [x[1] for x in deep[:30]],
                            "albums": len(plays)})
 
         twists = {"songs": [], "albums": []}
@@ -1250,9 +1266,10 @@ class Library:
             for gid, recs in artists.items():
                 v = [recs[p][PLAYS] if recs[p] else 0 for p in sel]
                 tot = sum(v)
-                if tot >= 20:
+                if tot >= 30:
                     j = max(range(len(sel)), key=lambda k: v[k])
-                    if v[j] / tot >= 0.55:
+                    # a real fan: most of the artist's plays, and plenty of them
+                    if v[j] / tot >= 0.6 and v[j] >= 10:
                         fans[gid] = (sel[j], v[j] / tot, v)
             for level, out in (("track", "songs"), ("album", "albums")):
                 recs_by, _, _ = self.level_agg(level, lo_ts, hi_ts, 0.0, 0.0, minplay_ms)
@@ -1266,10 +1283,10 @@ class Library:
                     fan, fan_share, art_v = fans[a]
                     v = [recs[p][PLAYS] if recs[p] else 0 for p in sel]
                     tot = sum(v)
-                    if tot < (8 if level == "track" else 15):
+                    if tot < (10 if level == "track" else 20):
                         continue
                     j = max(range(len(sel)), key=lambda k: v[k])
-                    if sel[j] == fan or v[j] / tot < 0.55:
+                    if sel[j] == fan or v[j] / tot < 0.6 or v[j] < (5 if level == "track" else 8):
                         continue
                     fan_here = v[sel.index(fan)] / tot
                     surprise = fan_share - fan_here
@@ -1279,7 +1296,7 @@ class Library:
                     # twists where the fan did play it (just less) beat "never played it at all"
                     found.append((surprise * math.log1p(tot) * (1.0 if fan_here > 0 else 0.6), item))
                 found.sort(key=lambda x: -x[0])
-                twists[out] = [x[1] for x in found[:10]]
+                twists[out] = [x[1] for x in found[:40]]
         self._albums_key, self._albums_val = key, {"people": people, "twists": twists}
         return self._albums_val
 
@@ -1289,7 +1306,7 @@ class Library:
                       r"boże narodzenie|wesołych świąt|colinde|last christmas", re.I)
     SEASONS = (("winter", "Winter", "❄️"), ("spring", "Spring", "🌱"), ("summer", "Summer", "☀️"), ("autumn", "Autumn", "🍂"))
 
-    def _signature(self, counts, totals, bucket_n, all_n, min_n=3, own_min=0.2, lift_min=1.5, limit=8):
+    def _signature(self, counts, totals, bucket_n, all_n, min_n=3, own_min=0.2, lift_min=1.5, limit=30):
         """Songs played unusually often in a bucket. counts: track -> plays in bucket,
         totals: track -> all plays, bucket_n / all_n: the person's plays in the bucket / overall."""
         share = bucket_n / all_n if all_n else 0.0
@@ -1394,8 +1411,8 @@ class Library:
             out["sessions"] = {
                 "count": len(sessions), "median_ms": lengths[len(lengths) // 2] if lengths else 0,
                 "avg_songs": round(all_n / len(sessions), 1) if sessions else 0,
-                "openers": [self._song(tid, times=n, of=len(multi)) for tid, n in openers.most_common(5) if n >= 2],
-                "closers": [self._song(tid, times=n, of=len(multi)) for tid, n in closers.most_common(5) if n >= 2],
+                "openers": [self._song(tid, times=n, of=len(multi)) for tid, n in openers.most_common(30) if n >= 2],
+                "closers": [self._song(tid, times=n, of=len(multi)) for tid, n in closers.most_common(30) if n >= 2],
                 "longest": {"start": iso_day(longest["start"]), "start_ts": longest["start"], "end_ts": longest["end"],
                             "ms": longest["ms"], "songs": longest["n"],
                             "top": self._song(longest["tracks"].most_common(1)[0][0])} if longest else None,
@@ -1413,15 +1430,15 @@ class Library:
                     res.append({"id": bid, "name": name, "emoji": emoji, "plays": n_b,
                                 "share": n_b / all_n if all_n else 0.0, "artist": art.title[a[0][0]] if a else None,
                                 "signature": self._signature(c, totals, n_b, all_n),
-                                "top": [self._song(tid, plays_here=n) for tid, n in c.most_common(5)]})
+                                "top": [self._song(tid, plays_here=n) for tid, n in c.most_common(20)]})
                 return res
             out["seasons"] = buckets(q["season"], self.SEASONS)
             days = [(d.lower(), d, e) for d, e in zip(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
                                                         "Saturday", "Sunday"), ("😩", "🌀", "🐪", "⏳", "🎉", "🛋️", "☁️"))]
             out["weekdays"] = buckets(q["wday"], days)
             fri_n = sum(q["friday"].values())
-            fri = self._signature(q["friday"], totals, fri_n, all_n, min_n=2, own_min=0.15, lift_min=1.3, limit=5)
-            out["friday"] = fri or [self._song(tid, plays_here=n) for tid, n in q["friday"].most_common(3)]
+            fri = self._signature(q["friday"], totals, fri_n, all_n, min_n=2, own_min=0.15, lift_min=1.3, limit=30)
+            out["friday"] = fri or [self._song(tid, plays_here=n) for tid, n in q["friday"].most_common(10)]
 
             # Christmas: when it starts each year
             xm = []
@@ -1443,18 +1460,18 @@ class Library:
                 "share": {m: q["modes"][m] / mode_ms for m in MODES} if mode_ms else {},
                 "known": mode_ms, "has_picked": bool(picked),
                 "picked": [self._song(tid, plays_here=n, plays=totals[tid], own=round(n / totals[tid], 3))
-                           for tid, n in picked.most_common(40) if n >= 3 and n / totals[tid] >= 0.5][:6],
+                           for tid, n in picked.most_common(200) if n >= 3 and n / totals[tid] >= 0.5][:30],
                 "served": [self._song(tid, plays_here=n, plays=totals[tid], own=round(n / totals[tid], 3))
-                           for tid, n in served.most_common(60)
-                           if n >= 3 and n / totals[tid] >= 0.8 and picked[tid] == 0][:6],
+                           for tid, n in served.most_common(300)
+                           if n >= 3 and n / totals[tid] >= 0.8 and picked[tid] == 0][:30],
             }
 
             # devices
             dev_ms = sum(q["devices"].values())
             out["devices"] = [{"id": d, "share": q["devices"][d] / dev_ms, "ms": q["devices"][d],
                                "signature": self._signature(q["dev_tracks"][d], totals, sum(q["dev_tracks"][d].values()),
-                                                            all_n, limit=5) if len(q["devices"]) > 1 else [],
-                               "top": [self._song(tid, plays_here=n) for tid, n in q["dev_tracks"][d].most_common(3)]}
+                                                            all_n, limit=20) if len(q["devices"]) > 1 else [],
+                               "top": [self._song(tid, plays_here=n) for tid, n in q["dev_tracks"][d].most_common(10)]}
                               for d in DEVICES if q["devices"][d]] if dev_ms else []
 
             # places (the page decides which one is home, after merging country codes and names)
@@ -1471,7 +1488,7 @@ class Library:
                                                                       rate=round(rate, 3), plays=totals[tid],
                                                                       months=len(q["months"][tid]))))
             lh.sort(key=lambda x: x[0], reverse=True)
-            out["lovehate"] = [x for _, x in lh[:8]]
+            out["lovehate"] = [x for _, x in lh[:30]]
             people.append(out)
 
         # milestones over the whole history
@@ -1545,8 +1562,8 @@ class Library:
                 parts.append({
                     "id": part_id, "share": share, "plays": blocks[pid][b],
                     "artist": art.title[a[0][0]] if a else None,
-                    "signature": [song(tid, plays_here=n_b, plays=n, own=round(own, 3)) for _, tid, n_b, n, own in sig[:8]],
-                    "top": [song(tid, plays_here=n_b) for n_b, tid in top[:5]],
+                    "signature": [song(tid, plays_here=n_b, plays=n, own=round(own, 3)) for _, tid, n_b, n, own in sig[:30]],
+                    "top": [song(tid, plays_here=n_b) for n_b, tid in top[:20]],
                 })
             people.append({"pid": pid, "hours": hours[pid], "plays": sum(blocks[pid]), "parts": parts})
         return {"people": people, "dayparts": [{"id": i, "name": n, "emoji": e, "from": 3 * k, "to": 3 * k + 3}
@@ -1624,7 +1641,7 @@ class Library:
                 if peak_n >= 8 and delay >= 6 and peak_n >= 3 * n / life:
                     slow.append((delay, song(tid, delay_months=delay, first=iso_day(t[0]), peak=mstr(peak_m),
                                              peak_plays=peak_n, plays=n)))
-            top = lambda xs: [x for _, x in sorted(xs, key=lambda kv: kv[0], reverse=True)[:12]]
+            top = lambda xs: [x for _, x in sorted(xs, key=lambda kv: kv[0], reverse=True)[:40]]
             people.append({"pid": pid, "comebacks": top(comebacks), "steady": top(steady),
                            "flings": top(flings), "slow": top(slow), "on_this_day": []})
 
@@ -1677,7 +1694,7 @@ class Library:
                                                 plays=[len(pa[tid]), len(pb[tid])])))
                 rows.sort(key=lambda kv: kv[0], reverse=True)
                 found.append({"a": a, "b": b, "wins": {str(k): v for k, v in wins.items()},
-                              "since": iso_day(start + 30 * DAY), "songs": [x for _, x in rows[:15]]})
+                              "since": iso_day(start + 30 * DAY), "songs": [x for _, x in rows[:40]]})
         return {"people": people, "found": found, "today": td.strftime("%Y-%m-%d")}
 
     # ----------------------------------------------------------- insights --
@@ -2578,7 +2595,7 @@ class Handler(BaseHTTPRequestHandler):
             self.num(qs, "min", 0, 0) * 60000, c["half_days"], c["people"], weights, c["by"],
             qs.get("common", "1") != "0", qs.get("formula", "entropy"), qs.get("norm", "0") == "1",
             qs.get("level", "track"), qs.get("view", "top"), self.num(qs, "gap", 365, 1),
-            c["minplay_s"]))
+            c["minplay_s"], qs.get("cap", "")))
 
     def api_detail(self, qs):
         c = self.common(qs)

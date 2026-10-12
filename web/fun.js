@@ -607,6 +607,24 @@ function ttRow(s, stat, detail) {
     <strong>${stat}</strong><small>${detail}</small></span></button></li>`;
 }
 
+// A list that shows the first n rows, with "Show more" revealing 10 more at a time.
+// The server already drops weak entries, so everything behind the button still passes the bar.
+function moreList(items, n, row, cls = "tt-list") {
+  const lis = items.map((x, i) => i < n ? row(x, i) : row(x, i).replace(/^\s*<li/, "<li hidden"));
+  const left = items.length - n;
+  return `<ol class="${cls}">${lis.join("")}</ol>` + (left > 0
+    ? `<button type="button" class="more-btn" data-more>Show more <span class="muted">(${left} left)</span></button>` : "");
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-more]");
+  if (!b) return;
+  const rest = [...b.previousElementSibling.querySelectorAll(":scope > li[hidden]")];
+  rest.slice(0, 10).forEach(li => { li.hidden = false; });
+  const left = rest.length - 10;
+  if (left > 0) b.querySelector("span").textContent = `(${left} left)`;
+  else b.remove();
+});
+
 function ttBody() {
   const t = ttData, many = META.people.length > 1;
   const who = pid => many ? `<p class="who-h" style="--c:${color(pid)}"><b>${esc(pname(pid))}</b></p>` : "";
@@ -619,10 +637,10 @@ function ttBody() {
         ${esc(B)} found ${plural(wb, "song")} first${f.wins.tie ? ` (${f.wins.tie} on the same day)` : ""}.</p>
         <p class="muted tt-intro">Counted from ${esc(niceDay(f.since))}, once both histories had started, so neither of you
         gets credit for songs the other knew before their data begins.</p>
-        ${f.songs.length ? `<ol class="tt-list">${f.songs.map(s => ttRow(s,
+        ${f.songs.length ? `${moreList(f.songs, 10, s => ttRow(s,
           `${esc(pname(s.first))}, ${fmtDays(s.lead_days)} earlier`,
           `First played ${esc(niceDay(s.found))}; ${esc(pname(s.second))} followed on ${esc(niceDay(s.followed))} ·
-           ${esc(A)} ${s.plays[0]} plays, ${esc(B)} ${s.plays[1]}`)).join("")}</ol>`
+           ${esc(A)} ${s.plays[0]} plays, ${esc(B)} ${s.plays[1]}`))}`
           : `<p class="muted">No shared songs that you both played at least 3 times ${esc(scope)}.</p>`}`;
     }).join("");
   }
@@ -652,7 +670,7 @@ function ttBody() {
   }[ttTab];
   return `<p class="muted tt-intro">${TT_INTRO[ttTab]} ${esc(scope[0].toUpperCase() + scope.slice(1))}.</p>
     <div class="ins-grid">${t.people.map(p => `<div>${who(p.pid)}${p[ttTab].length
-      ? `<ol class="tt-list">${p[ttTab].slice(0, 8).map(rows).join("")}</ol>` : `<p class="muted">${empty}</p>`}</div>`).join("")}</div>`;
+      ? moreList(p[ttTab], 8, rows) : `<p class="muted">${empty}</p>`}</div>`).join("")}</div>`;
 }
 
 document.addEventListener("click", e => {
@@ -710,11 +728,11 @@ function clockBody() {
     const part = p.parts[clockPart], your = many ? pname(p.pid) + "’s" : "your";
     const list = part.signature.length
       ? `<p class="muted tt-intro">Signature songs: played here far more than ${esc(your)} usual.</p>
-         <ol class="tt-list">${part.signature.slice(0, 6).map(s => ttRow(s, `${pct(s.own)} of its plays`,
-           `${s.plays_here} of ${plural(s.plays, "play")} are during ${esc(dp.name.toLowerCase())}`)).join("")}</ol>`
+         ${moreList(part.signature, 6, s => ttRow(s, `${pct(s.own)} of its plays`,
+           `${s.plays_here} of ${plural(s.plays, "play")} are during ${esc(dp.name.toLowerCase())}`))}`
       : part.top.length
         ? `<p class="muted tt-intro">Most played during ${esc(dp.name.toLowerCase())}:</p>
-           <ol class="tt-list">${part.top.slice(0, 5).map(s => ttRow(s, plural(s.plays_here, "play"), "")).join("")}</ol>`
+           ${moreList(part.top, 5, s => ttRow(s, plural(s.plays_here, "play"), ""))}`
         : `<p class="muted">${dp.id === "demon" ? "No demon hours here. Respect." : "Nothing played at this time of day."}</p>`;
     return `<div class="clock-card">${many ? `<p class="who-h" style="--c:${color(p.pid)}"><b>${esc(pname(p.pid))}</b></p>` : ""}
       <div class="clock-top">${radialClock(p.hours, color(p.pid), clockPart, c.dayparts)}

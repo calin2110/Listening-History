@@ -497,3 +497,10 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .hide-actions{display:inline-flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .hidden-note > span{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-right:10px}
 .focus-chips .chip{border-color:var(--accent)}
+
+/* "Show more" under insight lists */
+.more-btn{display:block;margin:6px auto 2px;padding:5px 14px;font-size:.85em;border-radius:999px;
+  background:transparent;border:1px solid var(--line,#ccc);color:inherit;cursor:pointer}
+.more-btn:hover{background:rgba(127,127,127,.12)}
+.tt-list li[hidden]{display:none}
+#cap-wrap[hidden]{display:none}

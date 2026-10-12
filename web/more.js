@@ -17,8 +17,8 @@ function renderSessions(m) {
     const s = p.sessions;
     if (!s.count) return `<p class="muted">No listening here.</p>`;
     const L = s.longest;
-    const list = (xs, verb) => xs.length ? `<ol class="tt-list">${xs.slice(0, 3).map(x => ttRow(x,
-      `${verb} ${plural(x.times, "session")}`, `${pct(x.times / x.of)} of ${yourOf(p.pid)} sessions`)).join("")}</ol>`
+    const list = (xs, verb) => xs.length ? `${moreList(xs, 3, x => ttRow(x,
+      `${verb} ${plural(x.times, "session")}`, `${pct(x.times / x.of)} of ${yourOf(p.pid)} sessions`))}`
       : `<p class="muted">No clear favorite yet.</p>`;
     return `<p class="big-stat">${plural(s.count, "session")}</p>
       <p class="muted">Usually ${fmt(s.median_ms)} long, ${s.avg_songs} songs on average.</p>
@@ -35,10 +35,10 @@ function bucketBlock(kind, p, i) {
   const b = p[kind][i];
   if (!b) return "";
   const list = b.signature.length
-    ? `<ol class="tt-list">${b.signature.slice(0, 5).map(s => ttRow(s, `${pct(s.own)} of its plays`,
-        `${s.plays_here} of ${plural(s.plays, "play")} are on ${kind === "weekdays" ? esc(b.name) + "s" : "in " + esc(b.name.toLowerCase())}`)).join("")}</ol>`
-    : b.top.length ? `<p class="muted tt-intro">No standouts; most played:</p><ol class="tt-list">${b.top.slice(0, 3).map(s =>
-        ttRow(s, plural(s.plays_here, "play"), "")).join("")}</ol>` : `<p class="muted">Nothing played.</p>`;
+    ? `${moreList(b.signature, 5, s => ttRow(s, `${pct(s.own)} of its plays`,
+        `${s.plays_here} of ${plural(s.plays, "play")} are on ${kind === "weekdays" ? esc(b.name) + "s" : "in " + esc(b.name.toLowerCase())}`))}`
+    : b.top.length ? `<p class="muted tt-intro">No standouts; most played:</p>${moreList(b.top, 3, s =>
+        ttRow(s, plural(s.plays_here, "play"), ""))}` : `<p class="muted">Nothing played.</p>`;
   return `<p><b>${pctS(b.share)}</b> of ${esc(yourOf(p.pid))} listening${b.artist ? ` · top artist ${esc(b.artist)}` : ""}</p>${list}`;
 }
 function renderCalendar(m) {
@@ -54,13 +54,13 @@ function renderCalendar(m) {
     const md = p.christmas.map(x => x.first.slice(5)).sort();
     const usual = md[Math.floor(md.length / 2)];
     return `<p>Usually around <b>${new Date("2024-" + usual + "T00:00").toLocaleDateString(undefined, {day: "numeric", month: "long"})}</b>.</p>
-      <ol class="tt-list">${p.christmas.slice().reverse().slice(0, 5).map(x => ttRow(x.top, `${x.year}: from ${esc(nice(x.first))}`,
-        `${plural(x.plays, "Christmas play")}, mostly ${esc(x.top.title)}`)).join("")}</ol>`;
+      ${moreList(p.christmas.slice().reverse(), 5, x => ttRow(x.top, `${x.year}: from ${esc(nice(x.first))}`,
+        `${plural(x.plays, "Christmas play")}, mostly ${esc(x.top.title)}`))}`;
   })}` : "";
   const friday = `<p class="sub-h">🎉 Friday night anthem <span class="muted">Friday 6 pm to Saturday 4 am</span></p>${grid(m.people, p =>
-    p.friday.length ? `<ol class="tt-list">${p.friday.slice(0, 3).map(s => ttRow(s,
+    p.friday.length ? `${moreList(p.friday, 3, s => ttRow(s,
       s.own ? `${pct(s.own)} of its plays` : plural(s.plays_here, "play"),
-      s.own ? `${s.plays_here} of ${plural(s.plays, "play")} are on Friday nights` : "on Friday nights")).join("")}</ol>`
+      s.own ? `${s.plays_here} of ${plural(s.plays, "play")} are on Friday nights` : "on Friday nights"))}`
       : `<p class="muted">No Friday nights here.</p>`)}`;
   return `<div id="cal-box"><h3>Seasons and weekdays</h3>
     ${tabs("seasons", p0.seasons)}<div id="cal-seasons">${grid(m.people, p => bucketBlock("seasons", p, calSel.seasons))}</div>
@@ -98,10 +98,10 @@ function renderModes(m) {
       ? `You picked <b>${pct(md.share.picked || 0)}</b> of your listening yourself; ${pct(auto)} was shuffle or autoplay.`
       : `${pct(auto)} of this was shuffle or autoplay. (Apple Music doesn’t record which songs you started yourself.)`;
     return `<p>${verdict}</p>${bar}
-      ${md.picked.length ? `<p class="sub-h">👆 Songs you choose on purpose</p><ol class="tt-list">${md.picked.slice(0, 4).map(s =>
-        ttRow(s, `picked ${pct(s.own)} of the time`, `${s.plays_here} of ${plural(s.plays, "play")} started by you`)).join("")}</ol>` : ""}
-      ${md.served.length ? `<p class="sub-h">🎲 Songs that just come on</p><ol class="tt-list">${md.served.slice(0, 4).map(s =>
-        ttRow(s, `${pct(s.own)} served`, `${s.plays_here} of ${plural(s.plays, "play")} came from shuffle, autoplay or the queue`)).join("")}</ol>` : ""}`;
+      ${md.picked.length ? `<p class="sub-h">👆 Songs you choose on purpose</p>${moreList(md.picked, 4, s =>
+        ttRow(s, `picked ${pct(s.own)} of the time`, `${s.plays_here} of ${plural(s.plays, "play")} started by you`))}` : ""}
+      ${md.served.length ? `<p class="sub-h">🎲 Songs that just come on</p>${moreList(md.served, 4, s =>
+        ttRow(s, `${pct(s.own)} served`, `${s.plays_here} of ${plural(s.plays, "play")} came from shuffle, autoplay or the queue`))}` : ""}`;
   })}</div>`;
 }
 
@@ -115,8 +115,8 @@ function renderDevices(m) {
     return `<p>Mostly a <b>${DEV_INFO[top.id][0]} ${esc(DEV_INFO[top.id][1].toLowerCase())}</b> listener: ${pct(top.share)}.</p>
       ${stackBar(p.devices.map(d => ({v: d.share, c: DEV_INFO[d.id][2], e: DEV_INFO[d.id][0], l: DEV_INFO[d.id][1]})))}
       ${p.devices.filter(d => d.signature.length).map(d => `<p class="sub-h">${DEV_INFO[d.id][0]} ${esc(DEV_INFO[d.id][1])} songs</p>
-        <ol class="tt-list">${d.signature.slice(0, 3).map(s => ttRow(s, `${pct(s.own)} of its plays`,
-          `${s.plays_here} of ${plural(s.plays, "play")}`)).join("")}</ol>`).join("")}`;
+        ${moreList(d.signature, 3, s => ttRow(s, `${pct(s.own)} of its plays`,
+          `${s.plays_here} of ${plural(s.plays, "play")}`))}`).join("")}`;
   })}</div>`;
 }
 
@@ -149,8 +149,8 @@ function renderTrips(m) {
 // --------------------------------------------------------------- love-hate --
 function renderLoveHate(m) {
   return `<div><h3>Love–hate songs <span class="muted">skipped a lot, played anyway</span></h3>${grid(m.people, p =>
-    p.lovehate.length ? `<ol class="tt-list">${p.lovehate.slice(0, 6).map(s => ttRow(s, `skipped ${pct(s.rate)} of the time`,
-      `${s.skips} skips in ${s.skip_n} starts, still played ${plural(s.plays, "time")} over ${plural(s.months, "month")}`)).join("")}</ol>`
+    p.lovehate.length ? `${moreList(p.lovehate, 6, s => ttRow(s, `skipped ${pct(s.rate)} of the time`,
+      `${s.skips} skips in ${s.skip_n} starts, still played ${plural(s.plays, "time")} over ${plural(s.months, "month")}`))}`
       : `<p class="muted">No love–hate songs: you either let them play or never come back.</p>`)}</div>`;
 }
 
@@ -193,8 +193,8 @@ function renderMusic(mu) {
         Newest: ${esc(p.newest.title)} by ${esc(p.newest.sub)} (${p.newest.year}).</p>` : ""}` : "";
     const len = p.patience !== null ? `<p class="sub-h">Song length</p>
       <p>Average song: <b>${fmt(p.avg_len_ms)}</b>. Patience score: <b>${pct(p.patience)}</b> of plays heard to the end.</p>
-      ${p.longest_finished.length ? `<ol class="tt-list">${p.longest_finished.slice(0, 3).map(s => ttRow(s,
-        `${fmt(s.duration_ms)}, heard to the end`, plural(s.plays, "play"))).join("")}</ol>` : ""}` : "";
+      ${p.longest_finished.length ? `${moreList(p.longest_finished, 3, s => ttRow(s,
+        `${fmt(s.duration_ms)}, heard to the end`, plural(s.plays, "play")))}` : ""}` : "";
     return `${p.genres.length ? `<p class="sub-h">Top genres</p><ul class="places">${genres}</ul>` : ""}${years}${decades}${age}${len}
       <p class="muted cov">Based on ${pct(p.coverage_genre)} of this listening with known genre.</p>`;
   });
@@ -680,7 +680,7 @@ document.addEventListener("click", e => {
 function renderAlbums(a) {
   if (!a.people.some(p => p.whole.length || p.complete.length || p.one_song.length || p.deep.length)) return "";
   const sec = (title, note, list, row) => list.length
-    ? `<p class="sub-h">${title} <span class="muted">${note}</span></p><ol class="tt-list">${list.slice(0, 4).map(row).join("")}</ol>` : "";
+    ? `<p class="sub-h">${title} <span class="muted">${note}</span></p>${moreList(list, 4, row)}` : "";
   return `<div><h3>Albums <span class="muted">how you listen to whole records</span></h3>${grid(a.people, p => {
     const html = sec("🎧 Start to finish", "60%+ of the album in one sitting", p.whole, x =>
         ttRow(x, `Played start to finish ${plural(x.times, "time")}`, `${esc(x.sub)} · ${plural(x.size, "song")}`))
@@ -708,6 +708,6 @@ function renderTwists(a) {
   return `<div><h3>🔀 Plot twists <span class="muted">by the artist, you’d expect the other one</span></h3>
     <p class="muted tt-intro">For each artist, whoever plays them most is “the fan”. These are the songs and albums where someone
       else listened more anyway.</p>
-    <div class="ins-grid">${t.songs.length ? `<div><p class="sub-h">Songs</p><ol class="tt-list">${t.songs.slice(0, 6).map(row).join("")}</ol></div>` : ""}
-      ${t.albums.length ? `<div><p class="sub-h">Albums</p><ol class="tt-list">${t.albums.slice(0, 6).map(row).join("")}</ol></div>` : ""}</div></div>`;
+    <div class="ins-grid">${t.songs.length ? `<div><p class="sub-h">Songs</p>${moreList(t.songs, 6, row)}</div>` : ""}
+      ${t.albums.length ? `<div><p class="sub-h">Albums</p>${moreList(t.albums, 6, row)}</div>` : ""}</div></div>`;
 }

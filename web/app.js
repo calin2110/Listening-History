@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const state = {
   frame: "all", from: "", to: "", q: "", sort: "total", min: 20, decay: 0, size: 48, page: 1,
   people: [], weights: {}, by: "plays", common: true, formula: "entropy", norm: false,   // multi-person
-  level: "track", view: "top", gap: 365, minplay: true, era: "month", itab: "overview",
+  level: "track", view: "top", gap: 365, cap: "", minplay: true, era: "month", itab: "overview",
 };
 let META = {people: [], years: []}, items = [], lastData = null, ctrl = null;
 
@@ -210,6 +210,8 @@ function syncUI() {
   $("view").value = state.view;
   $("gap-wrap").hidden = state.view !== "rediscover";
   $("gap").value = String(state.gap);
+  $("cap-wrap").hidden = state.level !== "track";
+  $("cap").value = state.cap;
   $("copy").disabled = state.level !== "track";
   $("copy").title = state.level === "track" ? "" : "Switch to Songs to copy a playlist";
 
@@ -260,7 +262,8 @@ function listParams(extra = {}) {
   return new URLSearchParams({
     ...baseParams(), q: state.q, sort: state.sort, min: state.min, page: state.page, size: state.size,
     w: state.people.map(weight).join(","), common: state.common ? 1 : 0, formula: state.formula,
-    norm: state.norm ? 1 : 0, level: state.level, view: state.view, gap: state.gap, ...extra,
+    norm: state.norm ? 1 : 0, level: state.level, view: state.view, gap: state.gap,
+    cap: state.level === "track" ? state.cap : "", ...extra,
   });
 }
 
@@ -681,7 +684,7 @@ function animateCompat(card) {
 // ------------------------------------------------------------- URL state --
 function writeHash() {
   const h = {f: state.frame, q: state.q, s: state.sort, m: state.min, d: state.decay, n: state.size, p: state.page,
-             lv: state.level, v: state.view, g: state.gap, mp: state.minplay ? 1 : 0, er: state.era, it: state.itab};
+             lv: state.level, v: state.view, g: state.gap, cap: state.cap, mp: state.minplay ? 1 : 0, er: state.era, it: state.itab};
   if (state.frame === "custom") Object.assign(h, {from: state.from, to: state.to});
   if (META.people.length > 1) {
     Object.assign(h, {ppl: state.people.join(","), w: state.people.map(weight).join(","),
@@ -704,6 +707,8 @@ function readHash() {
   if (LEVELS[h.get("lv")]) state.level = h.get("lv");
   if (h.get("v")) state.view = h.get("v");
   if (GAPS[+h.get("g")]) state.gap = +h.get("g");
+  if (h.has("cap")) state.cap = ["album", "artist"].includes(h.get("cap")) ? h.get("cap") : "";
+  else if (/^d\d+$/.test(state.view)) state.cap = "album";
   if (h.has("mp")) state.minplay = h.get("mp") !== "0";
   if (["day", "month", "quarter", "half", "year"].includes(h.get("er"))) state.era = h.get("er");
   if (h.get("it")) state.itab = h.get("it");
@@ -943,7 +948,12 @@ $("level").addEventListener("click", e => {
   syncUI();
   reload();
 });
-$("view").addEventListener("change", e => { state.view = e.target.value; syncUI(); reload(); });
+$("view").addEventListener("change", e => {
+  state.view = e.target.value;
+  state.cap = /^d\d+$/.test(state.view) ? "album" : "";   // "new to X" lists default to one song per album
+  syncUI(); reload();
+});
+$("cap").addEventListener("change", e => { state.cap = e.target.value; syncUI(); reload(); });
 $("gap").addEventListener("change", e => { state.gap = +e.target.value; syncUI(); reload(); });
 $("copy").addEventListener("click", copyPlaylist);
 $("insights").addEventListener("toggle", () => { if ($("insights").open) loadInsights(); });
