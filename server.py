@@ -45,8 +45,8 @@ API (all GET, JSON unless noted). Common parameters:
                   milestones
   /api/time       per person: comebacks, ever-present songs, flings, slow
                   burners, on this day; per pair: who found shared songs first
-  /api/cover      ?k=<key>: 302 redirect to the cover image (cached); s=small for a thumbnail,
-                  proxy=1 to get the image itself (for saving cards as images)
+  /api/cover      ?k=<key>: the cover image, downloaded once and then served from the covers/
+                  folder; s=small for a thumbnail
   /api/albums     album habits (start to finish, complete, one-song, deep cuts) and, for 2+
                   people, plot twists: songs/albums whose top listener isn't the artist's biggest fan
   /api/hidden     artists left out of all stats; add=<artist key> / remove=<key> / clear=1;
@@ -56,6 +56,9 @@ API (all GET, JSON unless noted). Common parameters:
   /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
                   audio=1 returns the clip itself
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
+  /api/concerts   your concerts with quick stats; add=1&artist=&date=&city=&people= / remove=<id>
+  /api/concert    ?id=<concert id>: songs to prepare: popular songs (Deezer/iTunes), forgotten
+                  favourites, songs to learn, deep cuts (setlists are never fetched: no spoilers)
 """
 
 import argparse
@@ -63,6 +66,7 @@ import array
 import bisect
 import csv
 import glob
+import hashlib
 import io
 import json
 import math
@@ -2198,11 +2202,42 @@ class JsonCache:
 NET = threading.BoundedSemaphore(4)                    # max parallel outgoing requests
 
 
-def http_json(url, retries=3, timeout=15):
+class CoverFiles:
+    """Cover images saved on disk, one file per image URL, so each cover is downloaded only once
+    (albums share a file). Served to the page from here instead of from Spotify or Apple."""
+    MAGIC = ((b"\xff\xd8", "image/jpeg"), (b"\x89PNG", "image/png"), (b"RIFF", "image/webp"), (b"GIF8", "image/gif"))
+
+    def __init__(self, folder):
+        self.folder = folder
+        os.makedirs(folder, exist_ok=True)
+
+    def _path(self, url):
+        return os.path.join(self.folder, hashlib.sha1(url.encode()).hexdigest()[:24] + ".img")
+
+    def get(self, url):
+        """(bytes, content type), downloading the image the first time."""
+        path = self._path(url)
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except FileNotFoundError:
+            with NET:
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    body = r.read(5_000_000)
+            tmp = f"{path}.{threading.get_ident()}.tmp"
+            with open(tmp, "wb") as f:
+                f.write(body)
+            os.replace(tmp, path)                          # never leaves half a file behind
+        ctype = next((t for m, t in self.MAGIC if body.startswith(m)), "image/jpeg")
+        return body, ctype
+
+
+def http_json(url, retries=3, timeout=15, headers=None):
     for attempt in range(retries):
         try:
             with NET:
-                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
@@ -2431,6 +2466,223 @@ def save_hidden(path, lib):
     os.replace(tmp, path)
 
 
+# ---------------------------------------------------------------- concerts --
+# "Prepare for the concert": upcoming shows you enter on the page (saved to concerts.json),
+# and the artist's popular songs (Deezer, falling back to iTunes), matched against your own history.
+# Setlists are deliberately never looked at: no spoilers.
+
+class ConcertStore:
+    def __init__(self, path):
+        self.path, self.lock = path, threading.Lock()
+        self.items = []
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    self.items = [c for c in json.load(fh) if c.get("id") and c.get("artist") and c.get("date")]
+            except (OSError, ValueError) as e:
+                print(f"  ! couldn't read {path}: {e}", file=sys.stderr)
+
+    def _save(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.items, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, self.path)
+
+    def all(self):
+        with self.lock:
+            return [dict(c) for c in self.items]
+
+    def get(self, cid):
+        with self.lock:
+            return next((dict(c) for c in self.items if c["id"] == cid), None)
+
+    def add(self, artist, date, city, people):
+        c = {"id": hashlib.sha1(f"{artist}|{date}|{time.time()}".encode()).hexdigest()[:10],
+             "artist": artist, "date": date, "city": city, "people": people}
+        with self.lock:
+            self.items.append(c)
+            self._save()
+        return c
+
+    def remove(self, cid):
+        with self.lock:
+            self.items = [c for c in self.items if c["id"] != cid]
+            self._save()
+
+
+def _song_norm(s):
+    """Title for matching a popular song to your plays: no feat., remaster, live, version."""
+    s = norm_title(s, True)
+    s = re.sub(r"\s*[\(\[][^\)\]]*(live|version|edit|mix|mono|stereo|acoustic|demo|session)[^\)\]]*[\)\]]", "", s)
+    s = re.sub(r"\s+-\s+.*(live|version|edit|mix|remaster|mono|stereo|acoustic|demo|session).*$", "", s)
+    s = s.replace("&", "and")
+    return re.sub(r"[^\w]+", " ", s).strip()
+
+
+def fetch_popular(artist):
+    """The artist's most popular songs: Deezer's top tracks, or an iTunes search as a fallback."""
+    want = norm_artist(artist, True)
+    try:
+        d = http_json("https://api.deezer.com/search/artist?" + urllib.parse.urlencode({"q": artist, "limit": 10}),
+                      retries=2, timeout=8) or {}
+        found = d.get("data") or []
+        best = next((a for a in found if norm_artist(a.get("name", ""), True) == want), None) or (found[0] if found else None)
+        if best:
+            top = http_json(f"https://api.deezer.com/artist/{best['id']}/top?limit=30", retries=2, timeout=8) or {}
+            songs = [{"title": t.get("title_short") or t.get("title"), "full": t.get("title"),
+                      "preview": t.get("preview") or None,
+                      "cover": ((t.get("album") or {}).get("cover_medium")) or None}
+                     for t in top.get("data") or [] if t.get("title")]
+            if songs:
+                return {"source": "Deezer", "artist": best.get("name"), "picture": best.get("picture_medium"),
+                        "fans": best.get("nb_fan"), "songs": songs}
+    except Exception as e:
+        print(f"  ! Deezer lookup for {artist} failed: {e}", file=sys.stderr)
+    d = http_json("https://itunes.apple.com/search?" + urllib.parse.urlencode(
+        {"term": artist, "entity": "song", "attribute": "artistTerm", "limit": 60}), retries=2, timeout=8) or {}
+    songs, seen = [], set()
+    for r in d.get("results") or []:
+        if norm_artist(r.get("artistName", ""), True) != want:
+            continue
+        k = _song_norm(r.get("trackName", ""))
+        if k and k not in seen:
+            seen.add(k)
+            songs.append({"title": r.get("trackName"), "full": r.get("trackName"), "preview": r.get("previewUrl"),
+                          "cover": (r.get("artworkUrl100") or "").replace("100x100bb", "250x250bb") or None})
+    return {"source": "iTunes", "artist": artist, "picture": None, "fans": None, "songs": songs[:25]}
+
+
+def concert_prep(lib, artist, pids, concert_day, popular):
+    """Everything the concert page shows for one artist and the people going."""
+    MIN_MS, DAYS90, FORGOT = 30_000, 90 * DAY, 120 * DAY
+    n = norm_artist(artist, True)
+    art = lib.levels["artist"]
+    tids = [t for t, c in enumerate(lib.credits) if n in c]
+    tidset = set(tids)
+    gid_of = {k: i for i, k in enumerate(art.keys)}
+    main_gid = gid_of.get("a:" + n, -1)
+    concert_ts = day_to_ts(concert_day) or time.time()
+
+    by_artist = [Counter() for _ in pids]              # main-artist listening, to rank this artist
+    last_any = [0.0] * len(pids)
+    times = [defaultdict(list) for _ in pids]          # track -> play times (this artist only)
+    ms_of = [Counter() for _ in pids]
+    idx = {p: j for j, p in enumerate(pids)}
+    for p in lib.all_raw:
+        t, tid, pid, src, ms = p[:5]
+        j = idx.get(pid)
+        if j is None or ms < MIN_MS or not t:
+            continue
+        by_artist[j][art.of_track[tid]] += ms
+        if t > last_any[j]:
+            last_any[j] = t
+        if tid in tidset:
+            times[j][tid].append(t)
+            ms_of[j][tid] += ms
+
+    # several versions of one song (live, remaster…) count together for matching
+    by_title = defaultdict(list)
+    for tid in tids:
+        by_title[_song_norm(lib.display[tid][1])].append(tid)
+
+    def plays_of(j, tids_):
+        return sum(len(times[j][t]) for t in tids_)
+
+    def last_of(j, tids_):
+        return max((times[j][t][-1] for t in tids_ if times[j][t]), default=0.0)
+
+    def item(title, tids_, **extra):
+        best = max(tids_, key=lambda t: sum(len(times[j][t]) for j in range(len(pids)))) if tids_ else None
+        out = {"title": title, "key": lib.keys[best] if best is not None else None,
+               "plays": [plays_of(j, tids_) for j in range(len(pids))],
+               "last": [iso_day(last_of(j, tids_)) if last_of(j, tids_) else None for j in range(len(pids))],
+               "spotify": (f"https://open.spotify.com/track/{lib.uris[best].split(':')[-1]}"
+                           if best is not None and lib.uris[best] else None), **extra}
+        return out
+
+    pop_items, pop_keys = [], set()
+    for i, s in enumerate((popular or {}).get("songs") or []):
+        k = _song_norm(s["title"])
+        if not k or k in pop_keys:
+            continue
+        pop_keys.add(k)
+        pop_items.append(item(s["title"], by_title.get(k, []), rank=len(pop_items) + 1,
+                              preview=s.get("preview"), cover=s.get("cover")))
+    likely = pop_items[:10]                            # their 10 most popular songs
+
+    people = []
+    for j, pid in enumerate(pids):
+        ref = min(last_any[j] or concert_ts, concert_ts)   # "lately" means the end of this person's data
+        songs = []
+        for k, ts_ in by_title.items():
+            all_t = sorted(t for tid in ts_ for t in times[j][tid])
+            if all_t:
+                songs.append((k, ts_, all_t))
+        total = sum(len(x[2]) for x in songs)
+        first = min((x[2][0] for x in songs), default=0.0)
+        last = max((x[2][-1] for x in songs), default=0.0)
+        rank = None
+        if main_gid >= 0 and by_artist[j][main_gid]:
+            mine = by_artist[j][main_gid]
+            rank = 1 + sum(1 for g, v in by_artist[j].items() if v > mine and g >= 0)
+        forgotten, repeat, deep = [], [], []
+        for k, ts_, all_t in songs:
+            nplays, recent = len(all_t), sum(1 for t in all_t if t > ref - DAYS90)
+            title = lib.display[max(ts_, key=lambda t: len(times[j][t]))][1]
+            if nplays >= 5 and all_t[-1] < ref - FORGOT:
+                forgotten.append((nplays, item(title, ts_, days_since=int((ref - all_t[-1]) // DAY))))
+            if recent >= 3:
+                repeat.append((recent, item(title, ts_, recent=recent)))
+            if nplays >= 5 and k not in pop_keys:
+                deep.append((nplays, item(title, ts_)))
+        learn = [x for x in pop_items if x["plays"][j] < 3]
+        known = sum(1 for x in likely if x["plays"][j] >= 3)
+        people.append({
+            "pid": pid, "plays": total, "ms": sum(ms_of[j].values()), "songs": len(songs),
+            "first": iso_day(first) if first else None, "last": iso_day(last) if last else None,
+            "rank": rank, "ready": {"known": known, "of": len(likely)},
+            "forgotten": [x for _, x in sorted(forgotten, key=lambda x: -x[0])][:30],
+            "repeat": [x for _, x in sorted(repeat, key=lambda x: -x[0])][:20],
+            "deep": [x for _, x in sorted(deep, key=lambda x: -x[0])][:20],
+            "learn": learn[:30],
+        })
+
+    shared = []
+    if len(pids) > 1:
+        for k, ts_ in by_title.items():
+            v = [plays_of(j, ts_) for j in range(len(pids))]
+            if min(v) >= 3:
+                title = lib.display[max(ts_, key=lambda t: plays_of(0, [t]) + plays_of(1, [t]))][1]
+                shared.append((min(v), item(title, ts_)))
+        shared.sort(key=lambda x: -x[0])
+
+    # past shows: did it change how much you listen? 30 days before vs after
+    after = None
+    if concert_ts < time.time():
+        after = []
+        for j in range(len(pids)):
+            b = sum(1 for ts_ in times[j].values() for t in ts_ if concert_ts - 30 * DAY <= t < concert_ts)
+            a = sum(1 for ts_ in times[j].values() for t in ts_ if concert_ts + DAY <= t < concert_ts + 31 * DAY)
+            after.append({"before": b, "after": a, "has_data": last_any[j] >= concert_ts + 31 * DAY})
+
+    return {"artist_known": bool(tids), "people_full": people, "popular": pop_items,
+            "shared": [x for _, x in shared][:30],
+            "after": after}
+
+
+def concert_summary(lib, artist, pids):
+    """Quick numbers for the concert list: plays and songs per person going."""
+    n = norm_artist(artist, True)
+    tids = {t for t, c in enumerate(lib.credits) if n in c}
+    plays, songs = Counter(), defaultdict(set)
+    if tids:
+        for p in lib.all_raw:
+            if p[1] in tids and p[2] in pids and p[4] >= 30_000:
+                plays[p[2]] += 1
+                songs[p[2]].add(p[1])
+    return [{"pid": pid, "plays": plays[pid], "songs": len(songs[pid])} for pid in pids]
+
+
 # ------------------------------------------------------------------ server --
 
 class BadParam(ValueError):
@@ -2482,11 +2734,13 @@ class ReadWriteLock:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "MusicStats/2.0"
-    lib = covers = lyrics = web_root = meta = None
+    lib = covers = cover_files = lyrics = web_root = meta = None
     clips, clip_lock = OrderedDict(), threading.Lock()   # recent preview clips
     data_lock = ReadWriteLock()
     hidden_path = "hidden_artists.json"
-    UNLOCKED = {"/api/cover", "/api/lyrics", "/api/preview"}   # don't touch the play data, and can be slow
+    UNLOCKED = {"/api/cover", "/api/lyrics", "/api/preview",   # don't touch the play data, and can be slow
+                "/api/concerts", "/api/concert"}                  # (these two take the read lock themselves)
+    concerts = concert_cache = None
     verbose = False
 
     def log_message(self, fmt, *args):
@@ -2516,6 +2770,7 @@ class Handler(BaseHTTPRequestHandler):
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
                 "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/albums": self.api_albums, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
+                "/api/concerts": self.api_concerts, "/api/concert": self.api_concert,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -2678,6 +2933,72 @@ class Handler(BaseHTTPRequestHandler):
         m = self.lib.meta()
         self.send_json({"hidden": m["hidden"], "only": m["only"], "hidden_tracks": m["hidden_tracks"]})
 
+    # -- concerts
+    def _people_param(self, qs):
+        pids = []
+        for x in (qs.get("people") or "").split(","):
+            if x.strip().isdigit() and int(x) < len(self.lib.people) and int(x) not in pids:
+                pids.append(int(x))
+        return pids or list(range(len(self.lib.people)))
+
+    def _concert_pids(self, c):
+        pids = [self.lib.people.index(n) for n in c.get("people") or [] if n in self.lib.people]
+        return pids or list(range(len(self.lib.people)))
+
+    def api_concerts(self, qs):
+        """Upcoming (and past) concerts. add=1&artist=&date=YYYY-MM-DD&city=&people=0,1 / remove=<id>."""
+        if qs.get("add"):
+            artist, date = (qs.get("artist") or "").strip(), qs.get("date") or ""
+            if not artist:
+                raise BadParam("artist is required")
+            try:
+                datetime.strptime(date, "%Y-%m-%d")
+            except ValueError:
+                raise BadParam("date must be YYYY-MM-DD")
+            n = norm_artist(artist, True)
+            artist = self.lib.credit_title.get(n, artist)      # the name as it appears in your history
+            self.concerts.add(artist, date, (qs.get("city") or "").strip()[:80],
+                              [self.lib.people[p] for p in self._people_param(qs)])
+        if qs.get("remove"):
+            self.concerts.remove(qs["remove"])
+        today = datetime.now().date().isoformat()
+        out = []
+        with Handler.data_lock.read():
+            for c in sorted(self.concerts.all(), key=lambda c: c["date"]):
+                pids = self._concert_pids(c)
+                days = (datetime.strptime(c["date"], "%Y-%m-%d").date() - datetime.now().date()).days
+                out.append({**c, "people": pids, "days": days, "past": c["date"] < today,
+                            "stats": concert_summary(self.lib, c["artist"], pids)})
+        self.send_json({"concerts": out})
+
+    def _cached(self, key, max_age, fetch):
+        """External lookups for concerts, kept for a few days (stale copies are used if the lookup fails)."""
+        hit, v = self.concert_cache.get(key)
+        if hit and v and time.time() - v.get("t", 0) < max_age:
+            return v["v"], None
+        try:
+            val = fetch()
+            self.concert_cache.set(key, {"t": time.time(), "v": val})
+            self.concert_cache.save()
+            return val, None
+        except Exception as e:
+            return (v or {}).get("v"), str(e)
+
+    def api_concert(self, qs):
+        c = self.concerts.get(qs.get("id", ""))
+        if not c:
+            return self.send_json({"error": "No such concert"}, 404)
+        n = norm_artist(c["artist"], True)
+        popular, pop_err = self._cached("pop:" + n, 3 * DAY, lambda: fetch_popular(c["artist"]))
+        with Handler.data_lock.read():
+            pids = self._concert_pids(c)
+            prep = concert_prep(self.lib, c["artist"], pids, c["date"], popular)
+        days = (datetime.strptime(c["date"], "%Y-%m-%d").date() - datetime.now().date()).days
+        self.send_json({**c, "people": pids, "days": days, **prep,
+                        "picture": (popular or {}).get("picture"), "fans": (popular or {}).get("fans"),
+                        "popular_source": (popular or {}).get("source"),
+                        "errors": {"popular": pop_err} if pop_err else {}})
+
     def api_albums(self, qs):
         c = self.common(qs)
         self.send_json(self.lib.album_stats(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
@@ -2732,16 +3053,15 @@ class Handler(BaseHTTPRequestHandler):
         if url:
             if qs.get("s") == "small":                    # thumbnails for tiny squares (eras grid)
                 url = url.replace("600x600bb", "100x100bb").replace("/ab67616d00001e02", "/ab67616d00004851")
-            if qs.get("proxy") == "1":                     # same-origin copy, so cards can be saved as images
-                try:
-                    with NET:
-                        req = urllib.request.Request(url, headers={"User-Agent": UA})
-                        with urllib.request.urlopen(req, timeout=10) as r:
-                            body, ctype = r.read(5_000_000), r.headers.get("Content-Type", "image/jpeg")
-                except Exception as e:
+            # served from the covers folder (downloaded once), which also keeps it same-origin
+            # so cards can be saved as images
+            try:
+                body, ctype = self.cover_files.get(url)
+            except Exception as e:
+                if qs.get("proxy") == "1":
                     return self.send_json({"error": f"Couldn't fetch the cover: {e}"}, 502)
-                return self.send(200, body, ctype, {"Cache-Control": "public, max-age=604800"})
-            self.send(302, headers={"Location": url, "Cache-Control": "public, max-age=604800"})
+                return self.send(302, headers={"Location": url, "Cache-Control": "no-store"})
+            self.send(200, body, ctype, {"Cache-Control": "public, max-age=2592000, immutable"})
         else:
             self.send_json({"error": "No cover found"}, 404, {"Cache-Control": "public, max-age=86400"})
 
@@ -2791,9 +3111,11 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--web", default=os.path.join(HERE, "web"), help="folder with index.html, app.js, style.css")
     ap.add_argument("--covers-cache", default="covers_cache.json")
+    ap.add_argument("--covers-dir", default="covers", help="folder where cover images are saved after the first download")
     ap.add_argument("--lyrics-cache", default="lyrics_cache.json")
     ap.add_argument("--meta-cache", default="meta_cache.json", help="genres, years, lengths, previews")
     ap.add_argument("--hidden", default="hidden_artists.json", help="artists left out of all stats (edited from the page)")
+    ap.add_argument("--concerts", default="concerts.json", help="your upcoming concerts (edited from the page)")
     ap.add_argument("--no-music-info", action="store_true", help="don't look up genres/years/previews in the background")
     ap.add_argument("--strict", action="store_true",
                     help="exact name matching (don't merge 'feat.'/'Remastered'/accent variants)")
@@ -2837,8 +3159,15 @@ def main():
 
     Handler.lib = lib
     Handler.covers = JsonCache(args.covers_cache)
+    Handler.cover_files = CoverFiles(args.covers_dir)
     Handler.lyrics = JsonCache(args.lyrics_cache)
     Handler.meta = MetaStore(lib, args.meta_cache)
+    Handler.concerts = ConcertStore(args.concerts)
+    Handler.concert_cache = JsonCache("concert_cache.json")
+    for k in [k for k in Handler.concert_cache.data if k.startswith("set:")]:   # never keep setlists around
+        del Handler.concert_cache.data[k]
+        Handler.concert_cache.dirty += 1
+    Handler.concert_cache.save()
     if not args.no_music_info:
         Handler.meta.start()
     Handler.web_root = os.path.realpath(args.web)

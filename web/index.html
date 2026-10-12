@@ -72,6 +72,7 @@
     <div class="funbar">
       <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
       <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
+      <button type="button" class="fun-btn ghostish" id="cx-open">🎤 Prepare for a concert</button>
     </div>
   </header>
 
@@ -168,10 +169,21 @@
   </div>
 </dialog>
 
+<dialog id="cx-dlg" class="cx-dlg" aria-labelledby="cx-title">
+  <div class="dlg-head">
+    <div><h2 id="cx-title">🎤 Prepare for your concerts</h2>
+      <p>Add the shows you’re going to and get the songs to brush up on: their hits, songs you barely know
+        and favourites you haven’t played in a while. No setlists, so no spoilers.</p></div>
+    <button type="button" class="close" id="cx-close" aria-label="Close">×</button>
+  </div>
+  <div id="cx-body" class="cx-body"></div>
+</dialog>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 <script src="fun.js"></script>
 <script src="more.js"></script>
+<script src="concerts.js"></script>
 </body>
 </html>
