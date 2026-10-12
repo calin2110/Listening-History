@@ -49,7 +49,8 @@ API (all GET, JSON unless noted). Common parameters:
                   proxy=1 to get the image itself (for saving cards as images)
   /api/albums     album habits (start to finish, complete, one-song, deep cuts) and, for 2+
                   people, plot twists: songs/albums whose top listener isn't the artist's biggest fan
-  /api/hidden     artists left out of all stats; add=<artist key> / remove=<key> / clear=1
+  /api/hidden     artists left out of all stats; add=<artist key> / remove=<key> / clear=1;
+                  focus on some artists only: only=<key> / only_remove=<key> / only_clear=1
   /api/artists    ?q=<name>: artists matching a name, for the "Hide artists" picker
   /api/music      genres, decades, nostalgia, song lengths (from music info looked up so far)
   /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
@@ -454,7 +455,7 @@ class Library:
         hits = [n for n, hay in self.credit_hay.items() if all(w in hay for w in words)] if words else []
         hits.sort(key=lambda n: -self.credit_ms[n])
         return [{"key": "a:" + n, "title": self.credit_title[n], "ms": self.credit_ms[n],
-                 "hidden": "a:" + n in self.hidden} for n in hits[:limit]]
+                 "hidden": "a:" + n in self.hidden, "only": "a:" + n in self.only} for n in hits[:limit]]
 
     def is_artist_key(self, key):
         return key.startswith("a:") and key[2:] in self.credit_title
@@ -484,12 +485,16 @@ class Library:
         self.credit_title = {n: c.most_common(1)[0][0] for n, c in shown.items()}
         return out
 
-    def set_hidden(self, keys):
+    def set_hidden(self, keys, only=()):
         """Leave out every play of the given artists (artist keys "a:<name>"), including songs
-        they're featured on, then rebuild the indexes and clear all caches."""
-        names = {k[2:] for k in keys if k.startswith("a:")}
+        they're featured on; with `only`, also leave out everything not by (or featuring) those
+        artists. Then rebuild the indexes and clear all caches."""
         self.hidden = sorted(k for k in keys if self.is_artist_key(k))
-        drop = {tid for tid, c in enumerate(self.credits) if c & names} if names else set()
+        self.only = sorted(k for k in only if self.is_artist_key(k) and k not in self.hidden)
+        names = {k[2:] for k in self.hidden}
+        keep_names = {k[2:] for k in self.only}
+        drop = {tid for tid, c in enumerate(self.credits)
+                if (names and c & names) or (keep_names and not c & keep_names)}
         keep = [i for i, p in enumerate(self.all_raw) if p[1] not in drop] if drop else range(len(self.all_raw))
         self.raw = [self.all_raw[i] for i in keep]
         self.extra = [self.all_extra[i] for i in keep]
@@ -1776,6 +1781,7 @@ class Library:
             "years": years,
             "sources": [SOURCES[i] for i in sorted({p[3] for p in self.all_raw})],
             "hidden": [{"key": k, "title": self.credit_title[k[2:]]} for k in self.hidden],
+            "only": [{"key": k, "title": self.credit_title[k[2:]]} for k in self.only],
             "hidden_tracks": self.hidden_tracks,
             "people": [{k: v for k, v in ps.items() if k != "last_ts"} for ps in self.person_stats],
             "tracks": len(self.keys),
@@ -2498,7 +2504,7 @@ class Handler(BaseHTTPRequestHandler):
             if route:
                 if url.path in self.UNLOCKED:
                     return route(qs)
-                if url.path == "/api/hidden" and set(qs) & {"add", "remove", "clear"}:
+                if url.path == "/api/hidden" and set(qs) & {"add", "remove", "clear", "only", "only_remove", "only_clear"}:
                     with Handler.data_lock.write():        # rebuilds the data: nobody reads meanwhile
                         return route(qs)
                 with Handler.data_lock.read():             # stats requests run side by side
@@ -2621,24 +2627,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"artists": self.lib.find_artists(qs.get("q", ""))})
 
     def api_hidden(self, qs):
-        """?add=<artist key> / ?remove=<artist key> / ?clear=1; always returns the current list."""
-        keys = set(self.lib.hidden)
+        """Hidden artists: ?add=<artist key> / ?remove=<key> / ?clear=1 (saved to a file).
+        Focus ("only these artists"): ?only=<key> / ?only_remove=<key> / ?only_clear=1 (until restart).
+        Always returns the current lists."""
+        keys, only = set(self.lib.hidden), set(self.lib.only)
+        for param in ("add", "only"):
+            if qs.get(param) and not self.lib.is_artist_key(qs[param]):
+                raise BadParam(f"{param} must be an artist key, like a:radiohead")
         if qs.get("add"):
-            if not self.lib.is_artist_key(qs["add"]):
-                raise BadParam("add must be an artist key, like a:radiohead")
             keys.add(qs["add"])
+            only.discard(qs["add"])
         if qs.get("remove"):
             keys.discard(qs["remove"])
         if qs.get("clear") == "1":
             keys = set()
-        if keys != set(self.lib.hidden):
+        if qs.get("only"):
+            only.add(qs["only"])
+            keys.discard(qs["only"])
+        if qs.get("only_remove"):
+            only.discard(qs["only_remove"])
+        if qs.get("only_clear") == "1":
+            only = set()
+        if keys != set(self.lib.hidden) or only != set(self.lib.only):
             t0 = time.time()
-            self.lib.set_hidden(keys)
-            save_hidden(Handler.hidden_path, self.lib)
-            print(f"Hidden artists: {', '.join(m['title'] for m in self.lib.meta()['hidden']) or 'none'} "
+            saved = keys != set(self.lib.hidden)
+            self.lib.set_hidden(keys, only)
+            if saved:
+                save_hidden(Handler.hidden_path, self.lib)
+            m = self.lib.meta()
+            print(f"Hidden: {', '.join(x['title'] for x in m['hidden']) or 'none'}; "
+                  f"only: {', '.join(x['title'] for x in m['only']) or 'everyone'} "
                   f"({self.lib.hidden_tracks:,} songs left out, {time.time() - t0:.1f}s)")
         m = self.lib.meta()
-        self.send_json({"hidden": m["hidden"], "hidden_tracks": m["hidden_tracks"]})
+        self.send_json({"hidden": m["hidden"], "only": m["only"], "hidden_tracks": m["hidden_tracks"]})
 
     def api_albums(self, qs):
         c = self.common(qs)

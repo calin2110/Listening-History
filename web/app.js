@@ -124,8 +124,10 @@ function headline() {
     const pid = +m[1], others = state.people.filter(p => p !== pid);
     return `What ${pname(pid)} listens to that ${listNames(others)} ${others.length > 1 ? "have" : "has"} never played`;
   }
-  return `What ${subj} listened to ${frameLabel()}`;
+  const only = (META.only || []).map(a => a.title);
+  return `What ${subj} listened to ${only.length ? `from ${listOf(only)} ` : ""}${frameLabel()}`;
 }
+const listOf = xs => xs.length <= 1 ? (xs[0] || "") : xs.slice(0, -1).join(", ") + " & " + xs[xs.length - 1];
 
 function setFrame(frame, from, to) {
   state.frame = frame;
@@ -427,7 +429,8 @@ function renderPager(page, pages) {
 // Insights are fetched and built in the background as soon as the list has loaded, so
 // opening the panel is instant. Each result is keyed by everything it depends on.
 const ins = {key: null, data: null, promise: null, ctrl: null, rendered: null, timer: null};
-const insKey = () => JSON.stringify({...baseParams(), era: state.era, hidden: (META.hidden || []).map(h => h.key)});
+const insKey = () => JSON.stringify({...baseParams(), era: state.era, hidden: (META.hidden || []).map(h => h.key),
+                                     only: (META.only || []).map(h => h.key)});
 
 async function fetchInsights(signal) {
   const q = new URLSearchParams(baseParams());
@@ -763,7 +766,8 @@ async function openDetail(item, fromStack = false) {
     (p.first ? ` · ${p.first === p.last ? niceDay(p.first) : niceDay(p.first) + " to " + niceDay(p.last)}` : "");
   const akey = artistKeyOf(d);
   const links = (d.spotify_url ? `<a href="${esc(d.spotify_url)}" target="_blank" rel="noopener">Open in Spotify</a>` : "") +
-    (akey ? `<button type="button" class="linkish" data-hide="${esc(akey)}">🙈 Hide ${esc(d.kind === "artist" ? d.title : d.sub)}</button>` : "") +
+    (akey ? `<button type="button" class="linkish" data-only="${esc(akey)}">🎯 Only ${esc(d.kind === "artist" ? d.title : d.sub)}</button>
+      <button type="button" class="linkish" data-hide="${esc(akey)}">🙈 Hide ${esc(d.kind === "artist" ? d.title : d.sub)}</button>` : "") +
     (d.apple_id ? `<a href="https://music.apple.com/song/${enc(d.apple_id)}" target="_blank" rel="noopener">Open in Apple Music</a>` : "") +
     (d.kind === "track" ? `<a href="https://genius.com/search?q=${enc(d.sub + " " + d.title)}" target="_blank" rel="noopener">Search on Genius</a>` : "");
   sections.push(`<section><h3>${esc(scope[0].toUpperCase() + scope.slice(1))}</h3><div class="stats">${
@@ -993,12 +997,19 @@ const artistKeyOf = d => d.kind === "artist" ? d.key : d.key?.startsWith("b:") ?
   : d.key ? "a:" + d.key.split("\t")[0] : null;
 
 function renderHiddenNote() {
-  const h = META.hidden || [];
-  $("hidden-note").hidden = !h.length;
-  $("hidden-note").innerHTML = h.length ? `🙈 Hiding ${h.map(a => `<span class="chip">${esc(a.title)}<button type="button"
-    data-unhide="${esc(a.key)}" aria-label="Show ${esc(a.title)} again">×</button></span>`).join("")}
-    <span class="muted">(${META.hidden_tracks.toLocaleString()} songs left out)</span>` : "";
-  $("hide-open").textContent = h.length ? `🙈 Hidden: ${h.length}` : "🙈 Hide artists";
+  const h = META.hidden || [], o = META.only || [];
+  const chips = (list, attr, verb) => list.map(a => `<span class="chip">${esc(a.title)}<button type="button"
+    ${attr}="${esc(a.key)}" aria-label="${verb} ${esc(a.title)}">×</button></span>`).join("");
+  $("hidden-note").hidden = !h.length && !o.length;
+  $("hidden-note").innerHTML =
+    (o.length ? `<span class="focus-chips">🎯 Only ${chips(o, "data-unonly", "Stop focusing on")}</span>` : "") +
+    (h.length ? `<span>🙈 Hiding ${chips(h, "data-unhide", "Show again:")}</span>` : "") +
+    `<span class="muted">(${META.hidden_tracks.toLocaleString()} songs left out)</span>`;
+  $("hide-open").textContent = o.length || h.length
+    ? [o.length ? `🎯 Only ${o.length}` : "", h.length ? `🙈 ${h.length} hidden` : ""].filter(Boolean).join(" · ")
+    : "🙈 Hide or 🎯 focus artists";
+  $("headline").textContent = headline();
+  document.title = $("headline").textContent;
 }
 
 async function setHidden(params) {
@@ -1006,7 +1017,10 @@ async function setHidden(params) {
     const d = await (await fetch("/api/hidden?" + new URLSearchParams(params))).json();
     if (d.error) throw new Error(d.error);
     META.hidden = d.hidden;
+    META.only = d.only;
     META.hidden_tracks = d.hidden_tracks;
+    const focused = params.only && d.only.find(a => a.key === params.only);
+    if (focused) toast(`Showing only ${listOf(d.only.map(a => a.title))}. Clear it with the × at the top.`);
     const added = params.add && d.hidden.find(a => a.key === params.add);
     if (added) toast(`Hid ${added.title}: ${d.hidden_tracks.toLocaleString()} songs left out in total. Undo with the × at the top.`);
     renderHiddenNote();
@@ -1020,7 +1034,11 @@ async function setHidden(params) {
 }
 
 function renderHideList() {
-  const h = META.hidden || [];
+  const h = META.hidden || [], o = META.only || [];
+  $("only-list").innerHTML = o.length ? o.map(a => `<li><span>${esc(a.title)}</span>
+      <button type="button" class="ghost small" data-unonly="${esc(a.key)}">Stop focusing</button></li>`).join("") +
+      `<li><span></span><button type="button" class="ghost small" data-unonly-all>Show all artists</button></li>`
+    : `<li class="muted">Showing all artists.</li>`;
   $("hide-list").innerHTML = h.length ? h.map(a => `<li><span>${esc(a.title)}</span>
       <button type="button" class="ghost small" data-unhide="${esc(a.key)}">Show again</button></li>`).join("") +
       `<li><span></span><button type="button" class="ghost small" data-unhide-all>Show everyone again</button></li>`
@@ -1036,9 +1054,11 @@ async function searchArtists() {
   try {
     const d = await (await fetch("/api/artists?q=" + enc(q), {signal: mine.signal})).json();
     $("hide-results").innerHTML = d.artists.length ? d.artists.map(a => `<li><span>${esc(a.title)}
-      <small class="muted">${hours(a.ms)}</small></span>${a.hidden
+      <small class="muted">${hours(a.ms)}</small></span><span class="hide-actions">${a.only
+        ? `<button type="button" class="ghost small" data-unonly="${esc(a.key)}">Stop focusing</button>`
+        : `<button type="button" class="ghost small" data-only="${esc(a.key)}">🎯 Only</button>`}${a.hidden
         ? `<button type="button" class="ghost small" data-unhide="${esc(a.key)}">Show again</button>`
-        : `<button type="button" class="ghost small" data-hide="${esc(a.key)}">Hide</button>`}</li>`).join("")
+        : `<button type="button" class="ghost small" data-hide="${esc(a.key)}">🙈 Hide</button>`}</span></li>`).join("")
       : `<li class="muted">No artist called “${esc(q)}”.</li>`;
   } catch (e) {
     if (e.name !== "AbortError") $("hide-results").innerHTML = `<li class="muted">Search failed: ${esc(e.message)}</li>`;
@@ -1050,12 +1070,17 @@ $("hide-close").addEventListener("click", () => $("hide-dlg").close());
 $("hide-q").addEventListener("input", () => { clearTimeout(hideTimer); hideTimer = setTimeout(searchArtists, 150); });
 document.addEventListener("click", e => {
   const add = e.target.closest("[data-hide]"), rm = e.target.closest("[data-unhide]");
-  if (add) {
-    if ($("dlg").open) $("dlg").close();                   // hidden from a song popup: that song is gone now
-    setHidden({add: add.dataset.hide});
+  const only = e.target.closest("[data-only]"), unonly = e.target.closest("[data-unonly]");
+  if (add || only) {
+    if ($("dlg").open) $("dlg").close();                   // from a song popup: the page is about to change under it
+    setHidden(add ? {add: add.dataset.hide} : {only: only.dataset.only});
   } else if (rm) {
     setHidden({remove: rm.dataset.unhide});
+  } else if (unonly) {
+    setHidden({only_remove: unonly.dataset.unonly});
   } else if (e.target.closest("[data-unhide-all]")) {
     setHidden({clear: 1});
+  } else if (e.target.closest("[data-unonly-all]")) {
+    setHidden({only_clear: 1});
   }
 });

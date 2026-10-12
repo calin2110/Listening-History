@@ -494,3 +494,6 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
   border-bottom:1px solid var(--line)}
 .hide-results small{margin-left:8px}
 @media (max-width:640px){.hide-btn{margin-left:0}}
+.hide-actions{display:inline-flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.hidden-note > span{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-right:10px}
+.focus-chips .chip{border-color:var(--accent)}

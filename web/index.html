@@ -38,7 +38,7 @@
       <input type="range" id="decay" min="0" max="8" step="1" value="0" aria-describedby="decay-note">
       <output id="decay-val" for="decay">Off</output>
       <label class="check"><input type="checkbox" id="minplay" checked> Ignore plays under 30 seconds</label>
-      <button type="button" class="ghost small hide-btn" id="hide-open">🙈 Hide artists</button>
+      <button type="button" class="ghost small hide-btn" id="hide-open">🙈 Hide or 🎯 focus artists</button>
       <span class="note" id="decay-note"></span>
     </div>
 
@@ -146,14 +146,17 @@
 
 <dialog id="hide-dlg" class="hide-dlg" aria-labelledby="hide-title">
   <div class="dlg-head">
-    <div><h2 id="hide-title">Hide artists</h2>
-      <p>Hidden artists are left out of everything: tops, insights, recaps and games. Songs they’re featured on too.</p></div>
+    <div><h2 id="hide-title">Hide or focus on artists</h2>
+      <p>🙈 Hide leaves an artist out of everything: tops, insights, recaps and games. 🎯 Only shows nothing but that
+        artist (add more to focus on several). Songs they’re featured on count too.</p></div>
     <button type="button" class="close" id="hide-close" aria-label="Close">×</button>
   </div>
   <div class="hide-body">
     <input type="search" id="hide-q" placeholder="Search for an artist…" aria-label="Search for an artist" autocomplete="off">
     <ul class="hide-results" id="hide-results"></ul>
-    <h3>Hidden now</h3>
+    <h3>🎯 Focusing on</h3>
+    <ul class="hide-list" id="only-list"></ul>
+    <h3>🙈 Hidden now</h3>
     <ul class="hide-list" id="hide-list"></ul>
   </div>
 </dialog>
