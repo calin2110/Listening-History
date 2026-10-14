@@ -212,6 +212,7 @@ function syncUI() {
   $("gap").value = String(state.gap);
   $("cap-wrap").hidden = state.level !== "track";
   $("cap").value = state.cap;
+  $("vs-open").hidden = META.people.length < 2;
   $("copy").disabled = state.level !== "track";
   $("copy").title = state.level === "track" ? "" : "Switch to Songs to copy a playlist";
 
@@ -773,6 +774,7 @@ async function openDetail(item, fromStack = false) {
   const links = (d.spotify_url ? `<a href="${esc(d.spotify_url)}" target="_blank" rel="noopener">Open in Spotify</a>` : "") +
     (akey ? `<button type="button" class="linkish" data-only="${esc(akey)}">🎯 Only ${esc(d.kind === "artist" ? d.title : d.sub)}</button>
       <button type="button" class="linkish" data-hide="${esc(akey)}">🙈 Hide ${esc(d.kind === "artist" ? d.title : d.sub)}</button>` : "") +
+    (akey && META.people.length > 1 ? `<button type="button" class="linkish" data-vs="${esc(d.kind === "artist" ? d.title : d.sub)}">⚔️ Versus</button>` : "") +
     (d.apple_id ? `<a href="https://music.apple.com/song/${enc(d.apple_id)}" target="_blank" rel="noopener">Open in Apple Music</a>` : "") +
     (d.kind === "track" ? `<a href="https://genius.com/search?q=${enc(d.sub + " " + d.title)}" target="_blank" rel="noopener">Search on Genius</a>` : "");
   sections.push(`<section><h3>${esc(scope[0].toUpperCase() + scope.slice(1))}</h3><div class="stats">${

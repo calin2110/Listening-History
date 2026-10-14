@@ -72,6 +72,7 @@
     <div class="funbar">
       <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
       <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
+      <button type="button" class="fun-btn ghostish" id="vs-open" hidden>⚔️ Versus</button>
       <button type="button" class="fun-btn ghostish" id="cx-open">🎤 Prepare for a concert</button>
     </div>
   </header>
@@ -179,11 +180,20 @@
   <div id="cx-body" class="cx-body"></div>
 </dialog>
 
+<dialog id="vs-dlg" class="vs-dlg" aria-labelledby="vs-title">
+  <div class="dlg-head">
+    <div><h2 id="vs-title">⚔️ Versus</h2><p>Two people, one artist: who’s the bigger fan?</p></div>
+    <button type="button" class="close" id="vs-close" aria-label="Close">×</button>
+  </div>
+  <div class="vs-wrap"><div id="vs-controls"></div><div id="vs-body"></div></div>
+</dialog>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 <script src="fun.js"></script>
 <script src="more.js"></script>
 <script src="concerts.js"></script>
+<script src="versus.js"></script>
 </body>
 </html>

@@ -56,6 +56,8 @@ API (all GET, JSON unless noted). Common parameters:
   /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
                   audio=1 returns the clip itself
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
+  /api/versus     ?a=&b=&artist=: two people, one artist: rounds, who owns which song, timelines;
+                  without artist: suggested close fights
   /api/concerts   your concerts with quick stats; add=1&artist=&date=&city=&people= / remove=<id>
   /api/concert    ?id=<concert id>: songs to prepare: popular songs (Deezer/iTunes), forgotten
                   favourites, songs to learn, deep cuts (setlists are never fetched: no spoilers)
@@ -2683,6 +2685,172 @@ def concert_summary(lib, artist, pids):
     return [{"pid": pid, "plays": plays[pid], "songs": len(songs[pid])} for pid in pids]
 
 
+# ------------------------------------------------------------------ versus --
+# Two people, one artist: who's the bigger fan? A few rounds (plays, hours, songs, fan since,
+# streak, biggest day, loyalty, lately), who owns which song, and both timelines.
+
+def _in_frame(t, lo_ts, hi_ts):
+    return t and (lo_ts is None or t >= lo_ts) and (hi_ts is None or t < hi_ts)
+
+
+def versus_suggestions(lib, a, b, lo_ts, hi_ts, limit=10):
+    """Artists both people play, closest fights first (weighted by how much they're played)."""
+    art = lib.levels["artist"]
+    c = {a: Counter(), b: Counter()}
+    for p in lib.all_raw:
+        if p[2] in c and p[4] >= 30_000 and _in_frame(p[0], lo_ts, hi_ts):
+            c[p[2]][art.of_track[p[1]]] += 1
+    out = []
+    for g, na in c[a].items():
+        nb = c[b].get(g, 0)
+        if g >= 0 and min(na, nb) >= 10:
+            close = 1 - abs(na - nb) / (na + nb)
+            out.append((close * math.log1p(na + nb), {"artist": art.title[g], "a": na, "b": nb}))
+    out.sort(key=lambda x: -x[0])
+    return [x for _, x in out[:limit]]
+
+
+def _data_span(lib, pid):
+    ts = [p[0] for p in lib.all_raw if p[2] == pid and p[0]]
+    return (ts[0], ts[-1]) if ts else (0.0, 0.0)
+
+
+def versus(lib, artist, a, b, lo_ts, hi_ts, overlap=False):
+    n = artist[2:] if artist.startswith("a:") else norm_artist(artist, True)
+    if n not in lib.credit_title:
+        return None
+    span = {pid: _data_span(lib, pid) for pid in (a, b)}
+    both = (max(span[a][0], span[b][0]), min(span[a][1], span[b][1]) + 1)
+    if overlap and both[0] < both[1]:                # only the time both histories cover
+        lo_ts = both[0] if lo_ts is None else max(lo_ts, both[0])
+        hi_ts = both[1] if hi_ts is None else min(hi_ts, both[1])
+    tids = {t for t, c in enumerate(lib.credits) if n in c}
+    art = lib.levels["artist"]
+    gid_of = {k: i for i, k in enumerate(art.keys)}
+    main_gid = gid_of.get("a:" + n, -1)
+    side = {pid: {"plays": 0, "ms": 0, "first": 0.0, "last": 0.0, "songs": Counter(), "days": Counter(),
+                  "months": Counter(), "all_ms": 0, "by_artist": Counter(), "data_first": 0.0, "data_last": 0.0,
+                  "night": 0}
+            for pid in (a, b)}
+    for i, p in enumerate(lib.all_raw):
+        t, tid, pid, src, ms = p[:5]
+        s = side.get(pid)
+        if s is None or not t:
+            continue
+        if not s["data_first"]:
+            s["data_first"] = t
+        s["data_last"] = t
+        if ms < 30_000 or not _in_frame(t, lo_ts, hi_ts):
+            continue
+        s["all_ms"] += ms
+        s["by_artist"][art.of_track[tid]] += ms
+        if tid not in tids:
+            continue
+        s["plays"] += 1
+        s["ms"] += ms
+        s["first"] = s["first"] or t
+        s["last"] = t
+        s["songs"][tid] += 1
+        s["days"][lib.all_lday[i]] += 1
+        s["months"][datetime.fromordinal(lib.all_lday[i]).strftime("%Y-%m")] += 1
+        how = lib.all_how[i]
+        if how != 255 and how % 24 < 4:
+            s["night"] += 1
+
+    # "lately" is the 90 days before both histories end (or the end of the time frame)
+    ref = min(side[a]["data_last"], side[b]["data_last"])
+    if hi_ts is not None:
+        ref = min(ref, hi_ts)
+    lately = {pid: 0 for pid in (a, b)}
+    for i, p in enumerate(lib.all_raw):
+        if p[2] in lately and p[1] in tids and p[4] >= 30_000 and ref - 90 * DAY < p[0] <= ref:
+            lately[p[2]] += 1
+
+    def streak(days):
+        best, cur, prev = 0, 0, None
+        for d in sorted(days):
+            cur = cur + 1 if prev is not None and d == prev + 1 else 1
+            best, prev = max(best, cur), d
+        return best
+
+    def rank(s):
+        mine = s["by_artist"].get(main_gid, 0)
+        return 1 + sum(1 for g, v in s["by_artist"].items() if v > mine and g >= 0) if mine else None
+
+    rounds = []
+
+    def rnd(rid, label, va, vb, fa=None, fb=None, lower=False, counts=True, note=""):
+        if va == vb or (not va and not vb):
+            win = None
+        else:
+            win = (a if va < vb else b) if lower else (a if va > vb else b)
+        rounds.append({"id": rid, "label": label, "a": va, "b": vb, "fa": fa, "fb": fb, "winner": win,
+                       "counts": counts, "note": note})
+
+    A, B = side[a], side[b]
+    rnd("plays", "🎧 Plays", A["plays"], B["plays"])
+    rnd("hours", "⏱️ Time listened", A["ms"], B["ms"])
+    rnd("songs", "📚 Songs explored", len(A["songs"]), len(B["songs"]))
+    # fan since: earlier wins, unless it's only because the other person's history starts later
+    if A["first"] and B["first"]:
+        early, late = (a, b) if A["first"] <= B["first"] else (b, a)
+        unfair = side[early]["first"] < side[late]["data_first"] - 30 * DAY
+        close = abs(A["first"] - B["first"]) < 14 * DAY
+        rnd("since", "🕰️ Fan since", A["first"], B["first"], iso_day(A["first"]), iso_day(B["first"]), lower=True,
+            counts=not unfair and not close,
+            note=f"{lib.people[late]}’s history only starts {iso_day(side[late]['data_first'])}" if unfair
+            else "within two weeks of each other" if close else "")
+    else:
+        rnd("since", "🕰️ Fan since", 1 if A["first"] else 0, 1 if B["first"] else 0,
+            iso_day(A["first"]) if A["first"] else None, iso_day(B["first"]) if B["first"] else None)
+    rnd("streak", "🔥 Longest streak", streak(A["days"]), streak(B["days"]))
+    da, db = A["days"].most_common(1), B["days"].most_common(1)
+    rnd("day", "📅 Biggest day", da[0][1] if da else 0, db[0][1] if db else 0,
+        datetime.fromordinal(da[0][0]).date().isoformat() if da else None,
+        datetime.fromordinal(db[0][0]).date().isoformat() if db else None)
+    la = A["ms"] / A["all_ms"] if A["all_ms"] else 0.0
+    lb = B["ms"] / B["all_ms"] if B["all_ms"] else 0.0
+    rnd("loyal", "💘 Share of all listening", round(la, 4), round(lb, 4), rank(A), rank(B))
+    rnd("lately", "📈 Lately", lately[a], lately[b], note=f"the 90 days before {iso_day(ref - 1)}")
+    rnd("night", "🌙 After midnight", A["night"], B["night"], counts=False, note="12–4 am, just for fun")
+
+    score = {a: sum(1 for r in rounds if r["counts"] and r["winner"] == a),
+             b: sum(1 for r in rounds if r["counts"] and r["winner"] == b)}
+
+    # who owns which song
+    owned, only_a, only_b = [], [], []
+    for tid in set(A["songs"]) | set(B["songs"]):
+        va, vb = A["songs"][tid], B["songs"][tid]
+        item = lib._song(tid, plays=[va, vb])
+        if va and vb:
+            owned.append((va + vb, item))
+        elif va >= 3:
+            only_a.append((va, item))
+        elif vb >= 3:
+            only_b.append((vb, item))
+    for xs in (owned, only_a, only_b):
+        xs.sort(key=lambda x: -x[0])
+    fav = lambda s: lib._song(s["songs"].most_common(1)[0][0], plays=s["songs"].most_common(1)[0][1]) if s["songs"] else None
+
+    months = sorted(set(A["months"]) | set(B["months"]))
+    if months:                                         # fill the gaps so the timeline is to scale
+        y, m = map(int, months[0].split("-"))
+        end, months = months[-1], []
+        while True:
+            k = f"{y:04d}-{m:02d}"
+            months.append(k)
+            if k >= end:
+                break
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    uneven = abs(span[a][0] - span[b][0]) > 90 * DAY or abs(span[a][1] - span[b][1]) > 90 * DAY
+    return {"artist": lib.credit_title[n], "key": "a:" + n, "a": a, "b": b, "rounds": rounds, "score": score,
+            "overlap": overlap, "uneven": uneven, "both_from": iso_day(both[0]), "both_to": iso_day(both[1] - 1),
+            "fav": {"a": fav(A), "b": fav(B)},
+            "owned": [x for _, x in owned[:40]], "only_a": [x for _, x in only_a[:30]], "only_b": [x for _, x in only_b[:30]],
+            "shared_songs": len(owned),
+            "timeline": [{"month": k, "a": A["months"][k], "b": B["months"][k]} for k in months]}
+
+
 # ------------------------------------------------------------------ server --
 
 class BadParam(ValueError):
@@ -2770,7 +2938,7 @@ class Handler(BaseHTTPRequestHandler):
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
                 "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/albums": self.api_albums, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
-                "/api/concerts": self.api_concerts, "/api/concert": self.api_concert,
+                "/api/concerts": self.api_concerts, "/api/concert": self.api_concert, "/api/versus": self.api_versus,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -2932,6 +3100,28 @@ class Handler(BaseHTTPRequestHandler):
                   f"({self.lib.hidden_tracks:,} songs left out, {time.time() - t0:.1f}s)")
         m = self.lib.meta()
         self.send_json({"hidden": m["hidden"], "only": m["only"], "hidden_tracks": m["hidden_tracks"]})
+
+    def api_versus(self, qs):
+        """?a=<person id>&b=<person id>&artist=<name or a:key> (plus from/to); without artist: suggestions."""
+        c = self.common(qs)
+        try:
+            a, b = int(qs.get("a", 0)), int(qs.get("b", 1))
+        except ValueError:
+            raise BadParam("a and b must be person ids")
+        if a == b or not (0 <= a < len(self.lib.people) and 0 <= b < len(self.lib.people)):
+            raise BadParam("pick two different people")
+        lo, hi = day_to_ts(c["frm"]), day_to_ts(c["to"], end=True)
+        if not (qs.get("artist") or "").strip():
+            if qs.get("overlap") == "1":
+                (fa, la), (fb, lb) = _data_span(self.lib, a), _data_span(self.lib, b)
+                if max(fa, fb) < min(la, lb):
+                    lo = max(lo or 0, fa, fb)
+                    hi = min(hi or float("inf"), min(la, lb) + 1)
+            return self.send_json({"suggestions": versus_suggestions(self.lib, a, b, lo, hi)})
+        d = versus(self.lib, qs["artist"].strip(), a, b, lo, hi, qs.get("overlap") == "1")
+        if d is None:
+            return self.send_json({"error": f"Nobody has played {qs['artist'].strip()}"}, 404)
+        self.send_json(d)
 
     # -- concerts
     def _people_param(self, qs):
