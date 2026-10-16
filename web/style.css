@@ -670,3 +670,12 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .wf-n{position:absolute;top:4px;left:4px;width:28px;height:28px;border-radius:50%;background:var(--accent);color:var(--bg);
   display:grid;place-items:center;font-weight:800;z-index:1}
 .wf-date{font-weight:600;color:var(--ink)!important}
+.us-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px}
+.us{border-left:3px solid var(--line);padding-left:10px}
+.us[hidden]{display:none}
+.us p{margin:2px 0}
+.us-tags{display:flex;flex-wrap:wrap;gap:4px}
+.us-tag{font-size:.78rem;padding:2px 8px;border-radius:999px;background:rgba(127,127,127,.14)}
+.us-off{background:rgba(112,72,232,.18)}.us-new{background:rgba(47,158,68,.18)}.us-hour{background:rgba(25,113,194,.18)}
+.us-long{background:rgba(232,89,12,.18)}.us-loop{background:rgba(214,51,108,.18)}.us-dive{background:rgba(240,140,0,.2)}
+.us-arts{font-size:.85rem}

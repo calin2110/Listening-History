@@ -2767,7 +2767,8 @@ def _extras(self, lo_ts, hi_ts, sel, minplay_ms):
                        "missing": [L for L in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if L not in letters],
                        "words": top_words, "plays": total,
                        "dark": round(dark / total, 4) if total else 0.0, "light": round(light / total, 4) if total else 0.0,
-                       "one_hit": [x for _, x in ohw[:30]]})
+                       "one_hit": [x for _, x in ohw[:30]],
+                       "unusual": self._unusual(lo, hi, pid, minplay_ms)})
 
     pairs = []
     if len(sel) > 1:
@@ -2838,7 +2839,104 @@ def _roulette(self, pid, minplay_ms, n=40):
             for tid, k in pickd]
 
 
-Library._extras, Library._sync_pair, Library._roulette = _extras, _sync_pair, _roulette
+def _unusual(self, lo, hi, pid, minplay_ms, limit=30):
+    """Listening sessions (30+ minutes of silence starts a new one) that don't look like you:
+    off your usual taste, full of songs you'd never played, at an hour you're rarely up,
+    much longer than usual, one song on loop, or a deep dive into an artist you never touch otherwise."""
+    art = self.levels["artist"]
+    first_ever = {}                                   # track -> this person's first play, over the whole history
+    for i in range(0, hi):
+        p = self.raw[i]
+        if p[2] == pid and p[0] and p[1] not in first_ever:
+            first_ever[p[1]] = i
+    sessions, cur = [], None
+    art_ms, art_n, hour_n, total_ms = Counter(), Counter(), Counter(), 0
+    for i in range(lo, hi):
+        t, tid, p, src, ms = self.raw[i][:5]
+        if p != pid or ms < minplay_ms or not t:
+            continue
+        g = art.of_track[tid]
+        art_ms[g] += ms
+        art_n[g] += 1
+        total_ms += ms
+        if self.how[i] != 255:
+            hour_n[self.how[i] % 24] += 1
+        if cur and t - cur["end"] <= 1800:
+            cur["end"] = t
+            cur["idx"].append(i)
+        else:
+            cur = {"start": t, "end": t, "idx": [i]}
+            sessions.append(cur)
+    sessions = [x for x in sessions if len(x["idx"]) >= 5]
+    if len(sessions) < 10 or not total_ms:
+        return []
+    all_hours = sum(hour_n.values()) or 1
+
+    stats = []
+    for x in sessions:
+        idx = x["idx"]
+        n = len(idx)
+        tracks, arts, ms_sum, strange = Counter(), Counter(), 0, 0.0
+        new = 0
+        for i in idx:
+            tid, ms = self.raw[i][1], self.raw[i][4]
+            g = art.of_track[tid]
+            tracks[tid] += 1
+            arts[g] += 1
+            ms_sum += ms
+            share = art_ms[g] / total_ms
+            strange += 1.0 if share < 0.005 else 0.0   # a play of an artist that's under 0.5% of your listening
+            new += first_ever.get(tid) == i
+        x.update(n=n, tracks=tracks, arts=arts, ms=ms_sum, off=strange / n, new=new / n, new_n=new,
+                 dur=x["end"] - x["start"] + self.raw[idx[-1]][4] / 1000,
+                 hour=self.how[idx[0]] % 24 if self.how[idx[0]] != 255 else None)
+        stats.append(x)
+
+    def pctl(key):
+        vals = sorted(x[key] for x in stats)
+        return lambda v: bisect.bisect_left(vals, v) / len(vals)
+    p_off, p_new, p_dur = pctl("off"), pctl("new"), pctl("dur")
+    med_dur = sorted(x["dur"] for x in stats)[len(stats) // 2]
+
+    out = []
+    for x in stats:
+        tags, score = [], 0.0
+        if x["off"] >= 0.6 and p_off(x["off"]) >= 0.9:
+            tags.append({"kind": "off", "emoji": "🧭", "text": f"{round(x['off'] * 100)}% of it by artists you almost never play"})
+            score += 2 * x["off"]
+        if x["new_n"] >= 5 and x["new"] >= 0.5 and p_new(x["new"]) >= 0.9:
+            tags.append({"kind": "new", "emoji": "🆕", "text": f"{x['new_n']} songs you’d never played before"})
+            score += 2 * x["new"]
+        if x["hour"] is not None and hour_n[x["hour"]] / all_hours < 0.015:
+            tags.append({"kind": "hour", "emoji": "🌙" if x["hour"] < 7 or x["hour"] >= 22 else "⏰",
+                         "text": f"started at {x['hour']}:00, when you almost never listen"})
+            score += 1.0
+        if x["dur"] >= 3 * med_dur and p_dur(x["dur"]) >= 0.98 and x["dur"] >= 3 * 3600:
+            tags.append({"kind": "long", "emoji": "🏃", "text": f"a {x['dur'] / 3600:.1f}-hour marathon "
+                                                                 f"({round(x['dur'] / max(med_dur, 1))}× your usual)"})
+            score += 1.5
+        tid, k = x["tracks"].most_common(1)[0]
+        if k >= 6 and k / x["n"] >= 0.6:
+            tags.append({"kind": "loop", "emoji": "🔁", "text": f"“{self.display[tid][1]}” {k} times"})
+            score += 1.5
+        g, kg = x["arts"].most_common(1)[0]
+        if g >= 0 and kg >= 5 and kg / art_n[g] >= 0.8:
+            tags.append({"kind": "dive", "emoji": "🕳️", "text": f"a deep dive into {art.title[g]}: "
+                                                                 f"{round(kg / art_n[g] * 100)}% of all your plays of them"})
+            score += 2.0
+        if not tags:
+            continue
+        i0 = x["idx"][0]
+        out.append((score + 0.1 * math.log1p(x["n"]), {
+            "start": iso_day(x["start"]), "day": datetime.fromordinal(self.lday[i0]).date().isoformat(),
+            "hour": x["hour"], "songs": x["n"], "ms": x["ms"], "tags": tags,
+            "artists": [art.title[g] for g, _ in x["arts"].most_common(3) if g >= 0],
+            "top": [self._song(t, plays_here=c) for t, c in x["tracks"].most_common(5)]}))
+    out.sort(key=lambda z: -z[0])
+    return [z for _, z in out[:limit]]
+
+
+Library._extras, Library._sync_pair, Library._roulette, Library._unusual = _extras, _sync_pair, _roulette, _unusual
 
 
 # ------------------------------------------------------------------ versus --

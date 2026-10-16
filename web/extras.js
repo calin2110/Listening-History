@@ -54,6 +54,20 @@ function renderExtras(x, G) {
         opacity:${(0.55 + 0.45 * w.plays / max).toFixed(2)}" title="${plural(w.plays, "play")}">${esc(w.word)}</span>`).join(" ")}</p>`;
   })}</div>`);
 
+  // unusual listening sessions
+  if (x.people.some(p => p.unusual?.length)) {
+    const when = u => new Date(u.day + "T00:00").toLocaleDateString(undefined, {weekday: "short", day: "numeric", month: "short", year: "numeric"})
+      + (u.hour != null ? `, ${u.hour}:00` : "");
+    G.habits.push(`<div><h3>🛸 Unusual sessions <span class="muted">listening that didn’t look like you</span></h3>${grid(x.people, p =>
+      p.unusual?.length ? moreList(p.unusual, 4, u => `<li class="us">
+        <p class="us-when"><b>${esc(when(u))}</b> <span class="muted">· ${plural(u.songs, "song")} · ${fmt(u.ms)}</span></p>
+        <p class="us-tags">${u.tags.map(t => `<span class="us-tag us-${t.kind}">${t.emoji} ${esc(t.text)}</span>`).join("")}</p>
+        <div class="xs-covers">${u.top.map(t => `<button type="button" data-open-key="${esc(t.key)}" data-title="${esc(t.title)}"
+          data-sub="${esc(t.sub)}" title="${esc(t.title)} · ${esc(t.sub)} (${plural(t.plays_here, "play")})">${cover(t.cover_key)}</button>`).join("")}</div>
+        ${u.artists.length ? `<p class="muted us-arts">${esc(u.artists.join(", "))}</p>` : ""}</li>`, "us-list")
+        : `<p class="muted">Nothing out of the ordinary: you’re a creature of habit.</p>`)}</div>`);
+  }
+
   // one-hit wonders
   if (x.people.some(p => p.one_hit.length)) {
     G.music.push(`<div><h3>🦄 One-hit wonders <span class="muted">artists you only know for one song</span></h3>${grid(x.people, p =>
