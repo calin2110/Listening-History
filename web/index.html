@@ -73,6 +73,7 @@
       <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
       <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
       <button type="button" class="fun-btn ghostish" id="vs-open" hidden>⚔️ Versus</button>
+      <button type="button" class="fun-btn ghostish" id="rl-open">🎰 Rediscover roulette</button>
       <button type="button" class="fun-btn ghostish" id="cx-open">🎤 Prepare for a concert</button>
     </div>
   </header>
@@ -188,6 +189,14 @@
   <div class="vs-wrap"><div id="vs-controls"></div><div id="vs-body"></div></div>
 </dialog>
 
+<dialog id="rl-dlg" class="rl-dlg" aria-labelledby="rl-title">
+  <div class="dlg-head">
+    <div><h2 id="rl-title">🎰 Rediscover roulette</h2><p>A song you loved and then forgot: 8+ plays, nothing for over a year.</p></div>
+    <button type="button" class="close" id="rl-close" aria-label="Close">×</button>
+  </div>
+  <div class="game-stage" id="rl-body"></div>
+</dialog>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
@@ -195,5 +204,6 @@
 <script src="more.js"></script>
 <script src="concerts.js"></script>
 <script src="versus.js"></script>
+<script src="extras.js"></script>
 </body>
 </html>

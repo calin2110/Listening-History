@@ -430,7 +430,7 @@ const pick = () => game.pool.splice(Math.floor(Math.random() * game.pool.length)
 function openGame() {
   const modes = [["tune", "Name that tune"], ["hilo", "Higher or lower"]];
   if (state.people.length > 1) modes.push(["who", "Who played it more?"]);
-  modes.push(["bracket", "Song bracket"], ["month", "Guess the month"]);
+  modes.push(["bracket", "Song bracket"], ["month", "Guess the month"], ["order", "Which came first?"]);
   if (!modes.some(([m]) => m === game.mode)) game.mode = "tune";
   $("game-modes").innerHTML = modes.map(([m, l]) =>
     `<button type="button" role="tab" data-mode="${m}" aria-selected="${m === game.mode}">${l}</button>`).join("");

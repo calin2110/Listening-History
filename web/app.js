@@ -438,7 +438,7 @@ const insKey = () => JSON.stringify({...baseParams(), era: state.era, hidden: (M
 
 async function fetchInsights(signal) {
   const q = new URLSearchParams(baseParams());
-  const urls = ["insights", "fun", "time", "clock", "more", "music", "albums"].map(x =>
+  const urls = ["insights", "fun", "time", "clock", "more", "music", "albums", "extras"].map(x =>
     `/api/${x}?` + (x === "fun" ? new URLSearchParams({...baseParams(), era: state.era}) : q));
   const res = await Promise.all(urls.map(u => fetch(u, {signal})));
   const json = await Promise.all(res.map(r => r.json()));
@@ -467,8 +467,8 @@ function prefetchInsights() {
 
 function renderInsightsBody(key) {
   if (ins.rendered === key || !ins.data) return;
-  const [d, f, t, c, m, mu, a] = ins.data;
-  $("insights-body").innerHTML = renderInsights(d, f, t, c, m, mu, a);
+  const [d, f, t, c, m, mu, a, x] = ins.data;
+  $("insights-body").innerHTML = renderInsights(d, f, t, c, m, mu, a, x);
   ins.rendered = key;
   if ($("insights").open) showInsTab(state.itab);
   else document.querySelectorAll(".ins-group").forEach(g => { g.hidden = g.dataset.group !== state.itab; });
@@ -508,7 +508,7 @@ function streakWhen(s) {
 // Insights is grouped into tabs; each section goes into one group
 const INS_TABS = [["overview", "Overview"], ["habits", "Habits"], ["time", "Through time"],
                   ["music", "Your music"], ["places", "Places"]];
-function renderInsights(d, f, t, c, m, mu, a) {
+function renderInsights(d, f, t, c, m, mu, a, x) {
   const G = Object.fromEntries(INS_TABS.map(([k]) => [k, []]));
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
   const fun = f && typeof renderFunSections === "function" ? renderFunSections(f) : [];
@@ -535,6 +535,7 @@ function renderInsights(d, f, t, c, m, mu, a) {
   if (a && has("renderAlbums")) G.music.push(renderAlbums(a));
   if (mu && has("renderMusic")) G.music.push(renderMusic(mu));
   if (m && has("renderLoveHate")) G.music.push(renderLoveHate(m));
+  if (x && has("renderExtras")) renderExtras(x, G);                     // extras.js: A–Z, title mood, telepathy…
 
   const streakList = (list, kind) => list.length
     ? `<ul class="streaks">${list.slice(0, 5).map(s => `<li><b>×${s.len}</b><span>${esc(s.title)}

@@ -56,6 +56,9 @@ API (all GET, JSON unless noted). Common parameters:
   /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
                   audio=1 returns the clip itself
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
+  /api/extras     per person: A–Z of artists, title words (dark vs light), one-hit wonders;
+                  per pair: telepathy (same song within an hour, out of nowhere), most in-sync day
+  /api/roulette   ?people=<id>: random songs you loved but haven't played in over a year
   /api/versus     ?a=&b=&artist=: two people, one artist: rounds, who owns which song, timelines;
                   without artist: suggested close fights
   /api/concerts   your concerts with quick stats; add=1&artist=&date=&city=&people= / remove=<id>
@@ -74,6 +77,7 @@ import json
 import math
 import mimetypes
 import os
+import random
 import re
 import sys
 import threading
@@ -545,6 +549,7 @@ class Library:
         self.clock = lru_cache(maxsize=32)(self._clock)
         self.more = lru_cache(maxsize=16)(self._more)
         self.match = lru_cache(maxsize=32)(self._match)
+        self.extras = lru_cache(maxsize=16)(self._extras)
         self._albums_key = None
 
     # -------------------------------------------------------- aggregation --
@@ -2685,6 +2690,157 @@ def concert_summary(lib, artist, pids):
     return [{"pid": pid, "plays": plays[pid], "songs": len(songs[pid])} for pid in pids]
 
 
+# ------------------------------------------------------------------ extras --
+# More fun: your A–Z of artists, the words in your song titles (and how dark they are),
+# one-hit wonders, and for two people: telepathy (the same song within an hour, out of nowhere)
+# and your most in-sync day. Plus the rediscover roulette.
+
+TITLE_STOP = set("""a an the and or of to in on at for with from by is are was be it its it's i i'm im me my you your
+you're we our us he she his her they them this that these those not no don't dont do just so up out down all
+what when where who how why can can't cant will won't got get let oh yeah la na feat ft remix version live edit like song
+mix remastered remaster radio acoustic pt part ii iii vs x de el la le les der die das und von over away want take way into back""".split())
+DARK = re.compile(r"\b(death|dead|die|dying|kill|killer|blood|bleed|hell|demon|devil|grave|funeral|pain|hate|"
+                  r"war|dark|darkness|black|nightmare|scream|fear|knife|bullet|suicide|sin|sinner|chaos|ghost|"
+                  r"cold|broken|bury|burial|corpse|doom|evil|curse|cursed|venom|poison|tod|tot|sterben|hölle)\b", re.I)
+LIGHT = re.compile(r"\b(love|lover|sun|sunshine|happy|happiness|light|smile|heaven|summer|dance|dancing|sweet|"
+                   r"baby|honey|dream|dreams|kiss|beautiful|shine|golden|paradise|joy|good|friend|friends|fly|"
+                   r"liebe|sonne|angel)\b", re.I)
+
+
+def _letter(name):
+    c = _strip_accents(name.strip())[:1].upper()
+    if not c:
+        return None
+    return c if "A" <= c <= "Z" else "#"
+
+
+def _extras(self, lo_ts, hi_ts, sel, minplay_ms):
+    lo, hi = self._span(lo_ts, hi_ts)
+    art = self.levels["artist"]
+    people = []
+    for pid in sel:
+        art_ms, art_tracks, plays = Counter(), defaultdict(Counter), Counter()
+        for i in range(lo, hi):
+            t, tid, p, src, ms = self.raw[i][:5]
+            if p != pid or ms < minplay_ms or not t:
+                continue
+            g = art.of_track[tid]
+            art_ms[g] += ms
+            art_tracks[g][tid] += 1
+            plays[tid] += 1
+        total = sum(plays.values())
+
+        # A–Z: the top artist for each first letter
+        letters = {}
+        for g, ms in art_ms.most_common():
+            if g < 0:
+                continue
+            L = _letter(art.title[g])
+            if not L:
+                continue
+            x = letters.setdefault(L, {"letter": L, "artist": art.title[g], "ms": ms, "n": 0,
+                                       "cover_key": self.keys[art_tracks[g].most_common(1)[0][0]]})
+            x["n"] += 1
+
+        # words in song titles, weighted by plays
+        words, dark, light = Counter(), 0, 0
+        for tid, n in plays.items():
+            title = self.display[tid][1]
+            clean = re.sub(r"[\(\[].*?[\)\]]|\s-\s.*$", "", title)
+            for w in set(re.findall(r"[^\W\d_][\w']+", clean.lower())):
+                if len(w) > 2 and w not in TITLE_STOP:
+                    words[w] += n
+            dark += n if DARK.search(clean) else 0
+            light += n if LIGHT.search(clean) else 0
+        top_words = [{"word": w, "plays": n} for w, n in words.most_common(24)]
+
+        # one-hit wonders: artists you only know for one song
+        ohw = []
+        for g, c in art_tracks.items():
+            n_art = sum(c.values())
+            tid, n = c.most_common(1)[0]
+            if g >= 0 and n >= 15 and n / n_art >= 0.9:
+                ohw.append((n, self._song(tid, plays=n, share=round(n / n_art, 3), artist_plays=n_art)))
+        ohw.sort(key=lambda x: -x[0])
+
+        people.append({"pid": pid, "letters": sorted(letters.values(), key=lambda x: x["letter"]),
+                       "missing": [L for L in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if L not in letters],
+                       "words": top_words, "plays": total,
+                       "dark": round(dark / total, 4) if total else 0.0, "light": round(light / total, 4) if total else 0.0,
+                       "one_hit": [x for _, x in ohw[:30]]})
+
+    pairs = []
+    if len(sel) > 1:
+        for ai in range(len(sel)):
+            for bi in range(ai + 1, len(sel)):
+                pairs.append(self._sync_pair(lo, hi, sel[ai], sel[bi], minplay_ms))
+    return {"people": people, "pairs": pairs}
+
+
+def _sync_pair(self, lo, hi, a, b, minplay_ms):
+    """Telepathy: both played the same song within an hour, neither having played it for 30+ days.
+    In sync: the day the two of you played the most of the same songs."""
+    HOUR, GAP = 3600, 30 * DAY
+    last, fresh = {}, {}                      # (pid, tid) -> last play time / whether that play came "out of nowhere"
+    events, seen = [], set()
+    day_songs = {a: defaultdict(set), b: defaultdict(set)}
+    for i in range(lo, hi):
+        t, tid, p, src, ms = self.raw[i][:5]
+        if p not in (a, b) or ms < minplay_ms or not t:
+            continue
+        day_songs[p][self.lday[i]].add(tid)
+        prev = last.get((p, tid))
+        is_fresh = prev is None or t - prev > GAP
+        q = b if p == a else a
+        lq = last.get((q, tid))
+        if is_fresh and lq is not None and t - lq <= HOUR and fresh.get((q, tid)):
+            k = (tid, self.lday[i])
+            if k not in seen:
+                seen.add(k)
+                events.append({**self._song(tid), "first": q, "second": p, "minutes": max(1, round((t - lq) / 60)),
+                               "day": iso_day(t)})
+        last[(p, tid)] = t
+        fresh[(p, tid)] = is_fresh
+    best, shared_days = None, 0
+    for d, sa in day_songs[a].items():
+        sb = day_songs[b].get(d)
+        if not sb:
+            continue
+        common = sa & sb
+        if common:
+            shared_days += 1
+            if len(sa) >= 5 and len(sb) >= 5:
+                score = len(common) / len(sa | sb)
+                if not best or (score, len(common)) > best[0]:
+                    best = ((score, len(common)), d, common)
+    sync = None
+    if best:
+        (score, n), d, common = best
+        sync = {"day": datetime.fromordinal(d).date().isoformat(), "share": round(score, 3), "common": n,
+                "songs": [self._song(tid) for tid in sorted(common, key=lambda t: -len(self.track_plays[t]))[:6]]}
+    events.reverse()                          # newest first
+    return {"a": a, "b": b, "telepathy": events[:40], "telepathy_n": len(events), "shared_days": shared_days, "sync": sync}
+
+
+def _roulette(self, pid, minplay_ms, n=40):
+    """Songs you loved (8+ plays) but haven't played in over a year, by the end of your history."""
+    plays, last = Counter(), {}
+    for p in self.raw:
+        if p[2] == pid and p[0] and p[4] >= minplay_ms:
+            plays[p[1]] += 1
+            last[p[1]] = p[0]
+    end = max(last.values(), default=0.0)
+    cands = [(tid, k) for tid, k in plays.items() if k >= 8 and last[tid] < end - 365 * DAY]
+    if not cands:
+        return []
+    pickd = random.sample(cands, min(n, len(cands)))
+    return [self._song(tid, plays=k, last=iso_day(last[tid]), years=round((end - last[tid]) / (365 * DAY), 1))
+            for tid, k in pickd]
+
+
+Library._extras, Library._sync_pair, Library._roulette = _extras, _sync_pair, _roulette
+
+
 # ------------------------------------------------------------------ versus --
 # Two people, one artist: who's the bigger fan? A few rounds (plays, hours, songs, fan since,
 # streak, biggest day, loyalty, lately), who owns which song, and both timelines.
@@ -2939,6 +3095,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
                 "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/albums": self.api_albums, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
                 "/api/concerts": self.api_concerts, "/api/concert": self.api_concert, "/api/versus": self.api_versus,
+                "/api/extras": self.api_extras, "/api/roulette": self.api_roulette,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -3100,6 +3257,15 @@ class Handler(BaseHTTPRequestHandler):
                   f"({self.lib.hidden_tracks:,} songs left out, {time.time() - t0:.1f}s)")
         m = self.lib.meta()
         self.send_json({"hidden": m["hidden"], "only": m["only"], "hidden_tracks": m["hidden_tracks"]})
+
+    def api_extras(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.extras(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                       int(c["minplay_s"] * 1000)))
+
+    def api_roulette(self, qs):
+        c = self.common(qs)
+        self.send_json({"songs": self.lib._roulette(c["people"][0], int(c["minplay_s"] * 1000))})
 
     def api_versus(self, qs):
         """?a=<person id>&b=<person id>&artist=<name or a:key> (plus from/to); without artist: suggestions."""
