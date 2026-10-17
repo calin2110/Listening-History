@@ -679,3 +679,9 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .us-off{background:rgba(112,72,232,.18)}.us-new{background:rgba(47,158,68,.18)}.us-hour{background:rgba(25,113,194,.18)}
 .us-long{background:rgba(232,89,12,.18)}.us-loop{background:rgba(214,51,108,.18)}.us-dive{background:rgba(240,140,0,.2)}
 .us-arts{font-size:.85rem}
+
+/* insights: each section shows up on its own */
+.ins-tabs button.pending::after{content:"";display:inline-block;width:6px;height:6px;margin-left:6px;border-radius:50%;
+  background:currentColor;vertical-align:middle;animation:ins-pulse 1s ease-in-out infinite}
+@keyframes ins-pulse{0%,100%{opacity:.2}50%{opacity:.8}}
+.ins-wait{padding:18px 0;animation:ins-pulse 1.4s ease-in-out infinite}

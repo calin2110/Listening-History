@@ -4,13 +4,13 @@
 // Uses helpers from app.js, fun.js and more.js (esc, enc, pname, color, pct, plural, cover, ttRow, moreList, …).
 
 // ---------------------------------------------------------------- insights --
-function renderExtras(x, G) {
-  const many = META.people.length > 1;
-  const who = pid => many ? `<p class="who-h" style="--c:${color(pid)}"><b>${esc(pname(pid))}</b></p>` : "";
-  const grid = (list, fn) => `<div class="ins-grid">${list.map(p => `<div>${who(p.pid)}${fn(p)}</div>`).join("")}</div>`;
+// Each section is its own function: the Insights panel shows it as soon as its data arrives.
+const xWho = pid => META.people.length > 1 ? `<p class="who-h" style="--c:${color(pid)}"><b>${esc(pname(pid))}</b></p>` : "";
+const xGrid = (list, fn) => `<div class="ins-grid">${list.map(p => `<div>${xWho(p.pid)}${fn(p)}</div>`).join("")}</div>`;
 
-  // telepathy and in-sync days, for each pair
-  x.pairs.forEach(pr => {
+// telepathy and in-sync days, for each pair (extras?part=sync)
+function renderTelepathy(x) {
+  return x.pairs.map(pr => {
     const A = esc(pname(pr.a)), B = esc(pname(pr.b));
     const tele = pr.telepathy.length
       ? `<p>${plural(pr.telepathy_n, "time")} one of you put on a song neither had played in a month, and the other did too within the hour.</p>
@@ -23,12 +23,14 @@ function renderExtras(x, G) {
         <div class="xs-covers">${s.songs.map(t => `<button type="button" data-open-key="${esc(t.key)}" data-title="${esc(t.title)}"
           data-sub="${esc(t.sub)}" title="${esc(t.title)} · ${esc(t.sub)}">${cover(t.cover_key)}</button>`).join("")}</div>
         <p class="muted">${plural(pr.shared_days, "day")} with at least one song you both played.</p>` : "";
-    G.overview.push(`<div><h3>🔮 Telepathy <span class="muted">${A} & ${B}</span></h3>${tele}
-      ${sync ? `<p class="sub-h">🫂 Most in sync</p>${sync}` : ""}</div>`);
-  });
+    return `<div><h3>🔮 Telepathy <span class="muted">${A} & ${B}</span></h3>${tele}
+      ${sync ? `<p class="sub-h">🫂 Most in sync</p>${sync}` : ""}</div>`;
+  }).join("");
+}
 
-  // A–Z
-  G.music.push(`<div><h3>🔤 Your A–Z <span class="muted">the top artist for every letter</span></h3>${grid(x.people, p => {
+// A–Z (extras?part=taste)
+function renderAZ(x) {
+  return `<div><h3>🔤 Your A–Z <span class="muted">the top artist for every letter</span></h3>${xGrid(x.people, p => {
     const by = Object.fromEntries(p.letters.map(l => [l.letter, l]));
     const covered = 26 - p.missing.length;
     return `<p>${covered === 26 ? "<b>All 26 letters.</b> A complete alphabet. 🏆" : `<b>${covered} of 26</b> letters.
@@ -39,10 +41,12 @@ function renderExtras(x, G) {
             <b>${L}</b><small>${esc(l.artist)}</small></span>`
           : `<span class="az-tile none"><b>${L}</b></span>`;
       }).join("")}</div>`;
-  })}</div>`);
+  })}</div>`;
+}
 
-  // title mood and words
-  G.music.push(`<div><h3>💀 vs ☀️ <span class="muted">what your song titles are about</span></h3>${grid(x.people, p => {
+// title mood and words (extras?part=taste)
+function renderMood(x) {
+  return `<div><h3>💀 vs ☀️ <span class="muted">what your song titles are about</span></h3>${xGrid(x.people, p => {
     const d = p.dark, l = p.light, tot = d + l;
     const verdict = !tot ? "Your titles keep their feelings to themselves." : d > l * 2 ? "Mostly darkness. 🖤"
       : l > d * 2 ? "Sunshine and love songs. 🌻" : "Balanced: light and dark in equal measure.";
@@ -52,29 +56,35 @@ function renderExtras(x, G) {
       <p class="muted tt-intro">Share of plays with a dark or a bright word in the title. Your most played title words:</p>
       <p class="words">${p.words.map(w => `<span style="font-size:${(0.8 + 1.1 * Math.sqrt(w.plays / max)).toFixed(2)}em;
         opacity:${(0.55 + 0.45 * w.plays / max).toFixed(2)}" title="${plural(w.plays, "play")}">${esc(w.word)}</span>`).join(" ")}</p>`;
-  })}</div>`);
+  })}</div>`;
+}
 
-  // unusual listening sessions
+// unusual listening sessions (extras?part=unusual)
+function renderUnusual(x) {
   if (x.people.some(p => p.unusual?.length)) {
     const when = u => new Date(u.day + "T00:00").toLocaleDateString(undefined, {weekday: "short", day: "numeric", month: "short", year: "numeric"})
       + (u.hour != null ? `, ${u.hour}:00` : "");
-    G.habits.push(`<div><h3>🛸 Unusual sessions <span class="muted">listening that didn’t look like you</span></h3>${grid(x.people, p =>
+    return `<div><h3>🛸 Unusual sessions <span class="muted">listening that didn’t look like you</span></h3>${xGrid(x.people, p =>
       p.unusual?.length ? moreList(p.unusual, 4, u => `<li class="us">
         <p class="us-when"><b>${esc(when(u))}</b> <span class="muted">· ${plural(u.songs, "song")} · ${fmt(u.ms)}</span></p>
         <p class="us-tags">${u.tags.map(t => `<span class="us-tag us-${t.kind}">${t.emoji} ${esc(t.text)}</span>`).join("")}</p>
         <div class="xs-covers">${u.top.map(t => `<button type="button" data-open-key="${esc(t.key)}" data-title="${esc(t.title)}"
           data-sub="${esc(t.sub)}" title="${esc(t.title)} · ${esc(t.sub)} (${plural(t.plays_here, "play")})">${cover(t.cover_key)}</button>`).join("")}</div>
         ${u.artists.length ? `<p class="muted us-arts">${esc(u.artists.join(", "))}</p>` : ""}</li>`, "us-list")
-        : `<p class="muted">Nothing out of the ordinary: you’re a creature of habit.</p>`)}</div>`);
+        : `<p class="muted">Nothing out of the ordinary: you’re a creature of habit.</p>`)}</div>`;
   }
+  return "";
+}
 
-  // one-hit wonders
+// one-hit wonders (extras?part=taste)
+function renderOneHit(x) {
   if (x.people.some(p => p.one_hit.length)) {
-    G.music.push(`<div><h3>🦄 One-hit wonders <span class="muted">artists you only know for one song</span></h3>${grid(x.people, p =>
+    return `<div><h3>🦄 One-hit wonders <span class="muted">artists you only know for one song</span></h3>${xGrid(x.people, p =>
       p.one_hit.length ? moreList(p.one_hit, 5, s => ttRow(s, plural(s.plays, "play"),
         s.share >= 1 ? "the only song of theirs you play" : `${pct(s.share)} of your ${plural(s.artist_plays, "play")} of them`))
-        : `<p class="muted">None: when you like an artist, you dig in.</p>`)}</div>`);
+        : `<p class="muted">None: when you like an artist, you dig in.</p>`)}</div>`;
   }
+  return "";
 }
 
 // --------------------------------------------------------------- roulette --

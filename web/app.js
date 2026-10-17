@@ -430,48 +430,126 @@ function renderPager(page, pages) {
 }
 
 // --------------------------------------------------------------- insights --
-// Insights are fetched and built in the background as soon as the list has loaded, so
-// opening the panel is instant. Each result is keyed by everything it depends on.
-const ins = {key: null, data: null, promise: null, ctrl: null, rendered: null, timer: null};
+// Every section waits only for the data it needs: each endpoint is its own request, and a section
+// appears as soon as its requests are back, so slow parts don't hold up the quick ones.
+// Everything starts loading in the background once the list is shown, beginning with the open tab.
+const ins = {key: null, data: {}, err: {}, ctrl: null, built: null, timer: null};
 const insKey = () => JSON.stringify({...baseParams(), era: state.era, hidden: (META.hidden || []).map(h => h.key),
                                      only: (META.only || []).map(h => h.key)});
+// endpoint name -> URL path and extra parameters
+const INS_EP = {
+  insights: ["insights"], fun: ["fun", () => ({era: state.era})], time: ["time"], clock: ["clock"], more: ["more"],
+  music: ["music"], albums: ["albums"], taste: ["extras", () => ({part: "taste"})], sync: ["extras", () => ({part: "sync"})],
+  unusual: ["extras", () => ({part: "unusual"})],
+};
+const INS_TABS = [["together", "🤝 Together"], ["you", "🪪 You"], ["clock", "🕐 Clock"], ["sessions", "🎧 Sessions"],
+                  ["calendar", "📅 Calendar"], ["time", "⏳ Through time"], ["albums", "💿 Albums"],
+                  ["music", "🎸 Your music"], ["words", "🔤 Words & letters"], ["places", "🌍 Places"]];
+const OLD_TABS = {overview: "together", habits: "clock"};          // links saved before the tabs were split
+const two = () => state.people.length > 1;
+const fnOk = name => typeof window[name] === "function";
+// [id, tab, endpoints it needs, render(data) -> html, shown only when]
+const INS_SECTIONS = [
+  ["compat", "together", ["insights"], D => insCompat(D.insights), two],
+  ["telepathy", "together", ["sync"], D => fnOk("renderTelepathy") ? renderTelepathy(D.sync) : "", two],
+  ["twists", "together", ["albums"], D => fnOk("renderTwists") ? renderTwists(D.albums) : "", two],
+  ["awards", "together", ["insights", "fun", "time", "clock", "more", "music"], D => fnOk("renderAwards")
+    ? renderAwards({d: D.insights, f: D.fun, t: D.time, c: D.clock, m: D.more, mu: D.music}) : "", two],
+  ["personality", "you", ["fun"], D => (typeof renderFunSections === "function" ? renderFunSections(D.fun)[0] : "") || ""],
+  ["milestones", "you", ["more"], D => fnOk("renderMilestones") ? renderMilestones(D.more) : ""],
+  ["clock", "clock", ["clock"], D => fnOk("renderClock") ? renderClock(D.clock) : ""],
+  ["heat", "clock", ["insights"], D => insHeat(D.insights)],
+  ["sessions", "sessions", ["more"], D => fnOk("renderSessions") ? renderSessions(D.more) : ""],
+  ["unusual", "sessions", ["unusual"], D => fnOk("renderUnusual") ? renderUnusual(D.unusual) : ""],
+  ["modes", "sessions", ["more"], D => fnOk("renderModes") ? renderModes(D.more) : ""],
+  ["devices", "sessions", ["more"], D => fnOk("renderDevices") ? renderDevices(D.more) : ""],
+  ["calendar", "calendar", ["more"], D => fnOk("renderCalendar") ? renderCalendar(D.more) : ""],
+  ["eras", "time", ["fun"], D => (typeof renderFunSections === "function" ? renderFunSections(D.fun)[1] : "") || ""],
+  ["timetravel", "time", ["time"], D => fnOk("renderTimeTravel") ? renderTimeTravel(D.time) : ""],
+  ["streaks", "time", ["insights"], D => insStreaks(D.insights)],
+  ["albums", "albums", ["albums"], D => fnOk("renderAlbums") ? renderAlbums(D.albums) : ""],
+  ["genres", "music", ["music"], D => fnOk("renderMusic") ? renderMusic(D.music) : ""],
+  ["lovehate", "music", ["more"], D => fnOk("renderLoveHate") ? renderLoveHate(D.more) : ""],
+  ["onehit", "music", ["taste"], D => fnOk("renderOneHit") ? renderOneHit(D.taste) : ""],
+  ["az", "words", ["taste"], D => fnOk("renderAZ") ? renderAZ(D.taste) : ""],
+  ["mood", "words", ["taste"], D => fnOk("renderMood") ? renderMood(D.taste) : ""],
+  ["trips", "places", ["more"], D => fnOk("renderTrips") ? renderTrips(D.more) : ""],
+  ["places", "places", ["insights"], D => insPlaces(D.insights)],
+];
+const insSections = () => INS_SECTIONS.filter(s => !s[4] || s[4]());
+const insTabs = () => INS_TABS.filter(([k]) => insSections().some(s => s[1] === k));
 
-async function fetchInsights(signal) {
-  const q = new URLSearchParams(baseParams());
-  const urls = ["insights", "fun", "time", "clock", "more", "music", "albums", "extras"].map(x =>
-    `/api/${x}?` + (x === "fun" ? new URLSearchParams({...baseParams(), era: state.era}) : q));
-  const res = await Promise.all(urls.map(u => fetch(u, {signal})));
-  const json = await Promise.all(res.map(r => r.json()));
-  if (!res[0].ok) throw new Error(json[0].error || "HTTP " + res[0].status);
-  return json.map((j, i) => i === 0 || res[i].ok ? j : null);
+function insURL(ep) {
+  const [path, extra] = INS_EP[ep];
+  return `/api/${path}?` + new URLSearchParams({...baseParams(), ...(extra ? extra() : {})});
 }
 
+// start (or keep) loading everything for the current filters; the open tab's data goes first
 function prefetchInsights() {
   const key = insKey();
-  if (ins.key === key && ins.promise) return ins.promise;          // already done, or on its way
+  if (ins.key === key) return;
   ins.ctrl?.abort();
   const ctrl = ins.ctrl = new AbortController();
-  ins.key = key; ins.data = null;
-  ins.promise = fetchInsights(ctrl.signal).then(data => {
-    if (ins.key !== key) return null;                               // filters changed meanwhile
-    ins.data = data;
-    renderInsightsBody(key);
-    return data;
-  }).catch(e => {
-    if (ins.key === key) { ins.key = null; ins.promise = null; }   // try again next time
-    throw e;
+  Object.assign(ins, {key, data: {}, err: {}, built: null});
+  buildInsights();
+  const tab = OLD_TABS[state.itab] || state.itab;
+  const first = new Set(insSections().filter(s => s[1] === tab).flatMap(s => s[2]));
+  const all = [...new Set(insSections().flatMap(s => s[2]))];
+  const order = [...all.filter(e => first.has(e)), ...all.filter(e => !first.has(e))];
+  order.forEach(ep => {
+    fetch(insURL(ep), {signal: ctrl.signal})
+      .then(async r => {
+        const j = await r.json();
+        if (ins.key !== key) return;
+        if (r.ok) ins.data[ep] = j;
+        else ins.err[ep] = j.error || "HTTP " + r.status;
+      })
+      .catch(e => { if (e.name !== "AbortError" && ins.key === key) ins.err[ep] = e.message; })
+      .finally(() => { if (ins.key === key) fillInsights(); });
   });
-  ins.promise.catch(() => {});                                      // a background failure isn't an error yet
-  return ins.promise;
 }
 
-function renderInsightsBody(key) {
-  if (ins.rendered === key || !ins.data) return;
-  const [d, f, t, c, m, mu, a, x] = ins.data;
-  $("insights-body").innerHTML = renderInsights(d, f, t, c, m, mu, a, x);
-  ins.rendered = key;
-  if ($("insights").open) showInsTab(state.itab);
-  else document.querySelectorAll(".ins-group").forEach(g => { g.hidden = g.dataset.group !== state.itab; });
+// the tabs, with an empty slot per section
+function buildInsights() {
+  const tabs = insTabs();
+  state.itab = OLD_TABS[state.itab] || state.itab;
+  if (!tabs.some(([k]) => k === state.itab)) state.itab = tabs[0]?.[0];
+  const label = id => ({compat: "taste match", awards: "awards", unusual: "unusual sessions", telepathy: "telepathy"})[id] || "";
+  $("insights-body").innerHTML = `<div class="tabs ins-tabs" role="tablist" aria-label="Insights">${tabs.map(([k, l]) =>
+      `<button type="button" role="tab" data-itab="${k}" aria-selected="${k === state.itab}" class="pending">${l}</button>`).join("")}</div>` +
+    tabs.map(([k]) => `<div class="ins-group" data-group="${k}" ${k === state.itab ? "" : "hidden"}>${insSections().filter(s => s[1] === k)
+      .map(s => `<div class="ins-slot" data-sec="${s[0]}"><p class="muted ins-wait">Loading ${esc(label(s[0]))}…</p></div>`).join("")}
+      <p class="muted ins-empty" hidden>Nothing here for this time frame.</p></div>`).join("");
+  ins.built = ins.key;
+}
+
+// fill every slot whose data is back
+function fillInsights() {
+  const D = ins.data;
+  insSections().forEach(([id, tab, deps, render]) => {
+    const slot = document.querySelector(`.ins-slot[data-sec="${id}"]`);
+    if (!slot || slot.dataset.done) return;
+    const failed = deps.find(e => ins.err[e]);
+    if (failed) {
+      slot.innerHTML = `<p class="muted">Couldn't load this part (${esc(ins.err[failed])}).</p>`;
+      slot.dataset.done = 1;
+      return;
+    }
+    if (!deps.every(e => D[e])) return;
+    let html = "";
+    try { html = render(D); } catch (e) { console.error(id, e); html = `<p class="muted">Couldn't show this part (${esc(e.message)}).</p>`; }
+    slot.innerHTML = html;
+    slot.hidden = !html;
+    slot.dataset.done = 1;
+    if (id === "compat" && $("insights").open && state.itab === "together")
+      slot.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
+  });
+  document.querySelectorAll(".ins-group").forEach(g => {
+    const slots = [...g.querySelectorAll(".ins-slot")];
+    const pending = slots.some(s => !s.dataset.done);
+    g.querySelector(".ins-empty").hidden = pending || slots.some(s => !s.hidden);
+    document.querySelector(`.ins-tabs [data-itab="${g.dataset.group}"]`)?.classList.toggle("pending", pending);
+  });
 }
 
 function schedulePrefetch() {                                      // wait for sliders to settle
@@ -479,20 +557,66 @@ function schedulePrefetch() {                                      // wait for s
   ins.timer = setTimeout(() => prefetchInsights(), 400);
 }
 
-async function loadInsights() {
-  const key = insKey(), body = $("insights-body");
-  if (ins.rendered === key) return showInsTab(state.itab);         // ready: nothing to wait for
-  body.style.opacity = ".5";
-  try {
-    await prefetchInsights();
-    renderInsightsBody(key);
-    if (ins.rendered === key) showInsTab(state.itab);
-  } catch (e) {
-    if (e.name === "AbortError" || ins.key !== key) return;
-    body.innerHTML = `<p class="muted">Couldn't load insights (${esc(e.message)}).</p>`;
-  } finally {
-    if (insKey() === key) body.style.opacity = "";
-  }
+function loadInsights() {
+  prefetchInsights();
+  showInsTab(state.itab);
+}
+
+// ------------------------------------------------- sections built here --
+function insCompat(d) {
+  if (!d.compat?.length) return "";
+  const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
+  return `<div><h3>How compatible are you? <span class="muted">${esc(scope)}</span></h3>
+    ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`;
+}
+
+function insStreaks(d) {
+  const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
+  const streakList = (list, kind) => list.length
+    ? `<ul class="streaks">${list.slice(0, 5).map(s => `<li><b>×${s.len}</b><span>${esc(s.title)}
+        <small>${kind === "song" ? esc(s.sub) + " · " : ""}${streakWhen(s)} · ${fmt(s.ms)}</small></span></li>`).join("")}</ul>`
+    : `<p class="muted">No ${kind} played twice in a row here.</p>`;
+  return `<div><h3>Longest streaks ${esc(scope)}</h3><div class="ins-grid">${d.streaks.map(s => `
+    <div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(s.pid)}"><b>${esc(pname(s.pid))}</b></p>` : ""}
+      <p class="muted">Same song, back to back</p>${streakList(s.songs, "song")}
+      <p class="muted">Same artist, back to back</p>${streakList(s.artists, "artist")}
+    </div>`).join("")}</div></div>`;
+}
+
+function insHeat(d) {
+  const days = [...Array(7)].map((_, i) => new Date(2024, 0, 1 + i).toLocaleDateString(undefined, {weekday: "short"}));
+  return `<div><h3>When you listen <span class="muted">day of the week × hour</span></h3><div class="ins-grid">${d.clock.map(c => {
+    const max = Math.max(1, ...c.ms);
+    let cells = `<span></span>` + [0, 6, 12, 18].map(h => `<span class="hl">${h}:00</span>`).join("");
+    for (let day = 0; day < 7; day++) {
+      cells += `<span>${days[day]}</span>`;
+      for (let h = 0; h < 24; h++) {
+        const v = c.ms[day * 24 + h];
+        cells += `<i style="--c:${color(c.pid)};--o:${(v / max).toFixed(3)}" title="${days[day]} ${h}:00, ${fmt(v)}"></i>`;
+      }
+    }
+    return `<div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(c.pid)}"><b>${esc(pname(c.pid))}</b></p>` : ""}
+      <div class="heat">${cells}</div></div>`;
+  }).join("")}</div></div>`;
+}
+
+function insPlaces(d) {
+  // merge country codes (Spotify, Apple Music) and Tidal's country names for the same country
+  const merged = new Map();
+  d.places.forEach(p => {
+    const name = placeName(p.place);
+    const x = merged.get(name) || {name, ms: 0, plays: 0, top: p.top, topMs: 0};
+    x.ms += p.ms; x.plays += p.plays;
+    if (p.ms > x.topMs) { x.top = p.top; x.topMs = p.ms; }
+    merged.set(name, x);
+  });
+  const places = [...merged.values()].sort((a, b) => b.ms - a.ms).slice(0, 8);
+  if (!places.length) return "";
+  const max = places[0].ms;
+  return `<div><h3>Where you listened</h3><ul class="places">${places.map(p => `<li>
+    <span>${esc(p.name)}</span><span class="muted">${hours(p.ms)}</span>
+    <div class="bars"><i style="width:${p.ms / max * 100}%"></i></div>
+    <small>Most played there: ${esc(p.top.title)} by ${esc(p.top.sub)}</small></li>`).join("")}</ul></div>`;
 }
 
 // "12 Mar 2025, 21:04–23:40", or with both dates when a streak runs past midnight (browser's time zone)
@@ -505,93 +629,11 @@ function streakWhen(s) {
     : `${day(a)} ${time(a)} to ${day(b)} ${time(b)}`;
 }
 
-// Insights is grouped into tabs; each section goes into one group
-const INS_TABS = [["overview", "Overview"], ["habits", "Habits"], ["time", "Through time"],
-                  ["music", "Your music"], ["places", "Places"]];
-function renderInsights(d, f, t, c, m, mu, a, x) {
-  const G = Object.fromEntries(INS_TABS.map(([k]) => [k, []]));
-  const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
-  const fun = f && typeof renderFunSections === "function" ? renderFunSections(f) : [];
-  const has = name => typeof window[name] === "function";
-
-  if (d.compat?.length) {
-    G.overview.push(`<div><h3>How compatible are you? <span class="muted">${esc(scope)}</span></h3>
-      ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`);
-  }
-  if (a && has("renderTwists") && state.people.length > 1) G.overview.push(renderTwists(a));
-  if (has("renderAwards") && state.people.length > 1) G.overview.push(renderAwards({d, f, t, c, m, mu}));
-  if (fun[0]) G.overview.push(fun[0]);                                   // listening personality
-  if (m && has("renderMilestones")) G.overview.push(renderMilestones(m));
-
-  if (c && has("renderClock")) G.habits.push(renderClock(c));
-  if (m && has("renderSessions")) G.habits.push(renderSessions(m));
-  if (m && has("renderCalendar")) G.habits.push(renderCalendar(m));
-  if (m && has("renderModes")) G.habits.push(renderModes(m));
-  if (m && has("renderDevices")) G.habits.push(renderDevices(m));
-
-  if (fun[1]) G.time.push(fun[1]);                                       // eras
-  if (t && has("renderTimeTravel")) G.time.push(renderTimeTravel(t));
-
-  if (a && has("renderAlbums")) G.music.push(renderAlbums(a));
-  if (mu && has("renderMusic")) G.music.push(renderMusic(mu));
-  if (m && has("renderLoveHate")) G.music.push(renderLoveHate(m));
-  if (x && has("renderExtras")) renderExtras(x, G);                     // extras.js: A–Z, title mood, telepathy…
-
-  const streakList = (list, kind) => list.length
-    ? `<ul class="streaks">${list.slice(0, 5).map(s => `<li><b>×${s.len}</b><span>${esc(s.title)}
-        <small>${kind === "song" ? esc(s.sub) + " · " : ""}${streakWhen(s)} · ${fmt(s.ms)}</small></span></li>`).join("")}</ul>`
-    : `<p class="muted">No ${kind} played twice in a row here.</p>`;
-  G.time.push(`<div><h3>Longest streaks ${esc(scope)}</h3><div class="ins-grid">${d.streaks.map(s => `
-    <div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(s.pid)}"><b>${esc(pname(s.pid))}</b></p>` : ""}
-      <p class="muted">Same song, back to back</p>${streakList(s.songs, "song")}
-      <p class="muted">Same artist, back to back</p>${streakList(s.artists, "artist")}
-    </div>`).join("")}</div></div>`);
-
-  const days = [...Array(7)].map((_, i) => new Date(2024, 0, 1 + i).toLocaleDateString(undefined, {weekday: "short"}));
-  G.habits.splice(1, 0, `<div><h3>When you listen <span class="muted">day of the week × hour</span></h3><div class="ins-grid">${d.clock.map(c => {
-    const max = Math.max(1, ...c.ms);
-    let cells = `<span></span>` + [0, 6, 12, 18].map(h => `<span class="hl">${h}:00</span>`).join("");
-    for (let day = 0; day < 7; day++) {
-      cells += `<span>${days[day]}</span>`;
-      for (let h = 0; h < 24; h++) {
-        const v = c.ms[day * 24 + h];
-        cells += `<i style="--c:${color(c.pid)};--o:${(v / max).toFixed(3)}" title="${days[day]} ${h}:00, ${fmt(v)}"></i>`;
-      }
-    }
-    return `<div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(c.pid)}"><b>${esc(pname(c.pid))}</b></p>` : ""}
-      <div class="heat">${cells}</div></div>`;
-  }).join("")}</div></div>`);
-
-  if (m && has("renderTrips")) G.places.push(renderTrips(m));
-  // places: merge country codes (Spotify, Apple Music) and Tidal's country names for the same country
-  const merged = new Map();
-  d.places.forEach(p => {
-    const name = placeName(p.place);
-    const x = merged.get(name) || {name, ms: 0, plays: 0, top: p.top, topMs: 0};
-    x.ms += p.ms; x.plays += p.plays;
-    if (p.ms > x.topMs) { x.top = p.top; x.topMs = p.ms; }
-    merged.set(name, x);
-  });
-  const places = [...merged.values()].sort((a, b) => b.ms - a.ms).slice(0, 8);
-  if (places.length) {
-    const max = places[0].ms;
-    G.places.push(`<div><h3>Where you listened</h3><ul class="places">${places.map(p => `<li>
-      <span>${esc(p.name)}</span><span class="muted">${hours(p.ms)}</span>
-      <div class="bars"><i style="width:${p.ms / max * 100}%"></i></div>
-      <small>Most played there: ${esc(p.top.title)} by ${esc(p.top.sub)}</small></li>`).join("")}</ul></div>`);
-  }
-  const tabs = INS_TABS.filter(([k]) => G[k].length);
-  if (!tabs.some(([k]) => k === state.itab)) state.itab = tabs[0]?.[0] || "overview";
-  return `<div class="tabs ins-tabs" role="tablist" aria-label="Insights">${tabs.map(([k, l]) =>
-      `<button type="button" role="tab" data-itab="${k}" aria-selected="${k === state.itab}">${l}</button>`).join("")}</div>` +
-    tabs.map(([k]) => `<div class="ins-group" data-group="${k}" ${k === state.itab ? "" : "hidden"}>${G[k].join("")}</div>`).join("");
-}
-
 function showInsTab(tab) {
   state.itab = tab;
   document.querySelectorAll(".ins-tabs [data-itab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.itab === tab)));
   document.querySelectorAll(".ins-group").forEach(g => { g.hidden = g.dataset.group !== tab; });
-  if (tab === "overview") document.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
+  if (tab === "together") document.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
   writeHash();
 }
 document.addEventListener("click", e => {

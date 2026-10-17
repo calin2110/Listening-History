@@ -56,7 +56,7 @@ API (all GET, JSON unless noted). Common parameters:
   /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
                   audio=1 returns the clip itself
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
-  /api/extras     per person: A–Z of artists, title words (dark vs light), one-hit wonders;
+  /api/extras     part=taste|sync|unusual (default: all). per person: A–Z of artists, title words (dark vs light), one-hit wonders;
                   per pair: telepathy (same song within an hour, out of nowhere), most in-sync day
   /api/roulette   ?people=<id>: random songs you loved but haven't played in over a year
   /api/versus     ?a=&b=&artist=: two people, one artist: rounds, who owns which song, timelines;
@@ -2714,9 +2714,20 @@ def _letter(name):
     return c if "A" <= c <= "Z" else "#"
 
 
-def _extras(self, lo_ts, hi_ts, sel, minplay_ms):
+def _extras(self, lo_ts, hi_ts, sel, minplay_ms, part="all"):
+    """part: taste (A–Z, title words, one-hit wonders), sync (telepathy, in-sync days), unusual (sessions),
+    or all. Each part is its own request, so the page can show the quick ones first."""
     lo, hi = self._span(lo_ts, hi_ts)
     art = self.levels["artist"]
+    if part == "unusual":
+        return {"people": [{"pid": pid, "unusual": self._unusual(lo, hi, pid, minplay_ms)} for pid in sel]}
+    pairs = []
+    if part in ("sync", "all") and len(sel) > 1:
+        for ai in range(len(sel)):
+            for bi in range(ai + 1, len(sel)):
+                pairs.append(self._sync_pair(lo, hi, sel[ai], sel[bi], minplay_ms))
+    if part == "sync":
+        return {"pairs": pairs}
     people = []
     for pid in sel:
         art_ms, art_tracks, plays = Counter(), defaultdict(Counter), Counter()
@@ -2767,14 +2778,9 @@ def _extras(self, lo_ts, hi_ts, sel, minplay_ms):
                        "missing": [L for L in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if L not in letters],
                        "words": top_words, "plays": total,
                        "dark": round(dark / total, 4) if total else 0.0, "light": round(light / total, 4) if total else 0.0,
-                       "one_hit": [x for _, x in ohw[:30]],
-                       "unusual": self._unusual(lo, hi, pid, minplay_ms)})
-
-    pairs = []
-    if len(sel) > 1:
-        for ai in range(len(sel)):
-            for bi in range(ai + 1, len(sel)):
-                pairs.append(self._sync_pair(lo, hi, sel[ai], sel[bi], minplay_ms))
+                       "one_hit": [x for _, x in ohw[:30]]})
+        if part == "all":
+            people[-1]["unusual"] = self._unusual(lo, hi, pid, minplay_ms)
     return {"people": people, "pairs": pairs}
 
 
@@ -3202,8 +3208,13 @@ class Handler(BaseHTTPRequestHandler):
                 if url.path == "/api/hidden" and set(qs) & {"add", "remove", "clear", "only", "only_remove", "only_clear"}:
                     with Handler.data_lock.write():        # rebuilds the data: nobody reads meanwhile
                         return route(qs)
+                t0 = time.time()
                 with Handler.data_lock.read():             # stats requests run side by side
-                    return route(qs)
+                    route(qs)
+                took = time.time() - t0
+                if took >= 1.0:                            # so you can tell which part of the page is slow
+                    print(f"  slow: {url.path}{'?part=' + qs['part'] if qs.get('part') else ''} took {took:.1f}s")
+                return
             if url.path.startswith("/api/"):
                 return self.send_json({"error": "Unknown endpoint"}, 404)
             return self.static(url.path)
@@ -3358,8 +3369,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_extras(self, qs):
         c = self.common(qs)
+        part = qs.get("part", "all")
+        if part not in ("all", "taste", "sync", "unusual"):
+            raise BadParam("part must be taste, sync, unusual or all")
         self.send_json(self.lib.extras(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
-                                       int(c["minplay_s"] * 1000)))
+                                       int(c["minplay_s"] * 1000), part))
 
     def api_roulette(self, qs):
         c = self.common(qs)
