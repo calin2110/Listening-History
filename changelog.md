@@ -4,7 +4,8 @@ Every future feature or behavior change must add a brief one-line entry here.
 
 ## 2026-10-21
 
-- Song, artist, and album streak records — Shows biggest single-day totals and longest consecutive runs by plays and listening time.
+- Song, album, and artist streak records — Shows one listening-time winner for consecutive plays, a day, a week, or a month.
+- Streak period tabs — Switches between consecutive, daily, weekly, and monthly records.
 
 ## 2026-10-17
 

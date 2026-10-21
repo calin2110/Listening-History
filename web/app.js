@@ -570,39 +570,38 @@ function insCompat(d) {
     ${d.compat.map(c => compatCard(c, d.compat_weights)).join("")}</div>`;
 }
 
+const STREAK_MODES = [["runs", "Consecutive plays"], ["days", "Within a day"],
+                      ["weeks", "Within a week"], ["months", "Within a month"]];
+let streakMode = "runs";
+
 function insStreaks(d) {
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
   const kinds = [["songs", "Song", "track"], ["albums", "Album", "album"], ["artists", "Artist", "artist"]];
-  const same = (a, b) => a && b && a.key === b.key && a.date === b.date && a.start_ts === b.start_ts
-    && a.plays === b.plays && a.ms === b.ms;
-  const records = (set, run) => {
+  const records = (set, mode) => {
     const rows = [];
-    const add = (s, label, kind, metric) => {
+    const add = (s, label, kind) => {
       if (!s) return;
       const plays = `${s.plays.toLocaleString()} ${s.plays === 1 ? "play" : "plays"}`;
-      const when = run ? streakWhen(s) : `on ${niceDay(s.date)}`;
+      const when = mode === "runs" ? streakWhen(s) : mode === "days" ? `on ${niceDay(s.date)}`
+        : mode === "weeks" ? `week of ${niceDay(s.date)}`
+        : `in ${new Date(s.date + "T00:00").toLocaleDateString(undefined, {month: "long", year: "numeric"})}`;
       rows.push(`<li><button type="button" data-open-key="${esc(s.key)}" data-kind="${kind}"
         data-title="${esc(s.title)}" data-sub="${esc(s.sub)}"><img src="/api/cover?k=${enc(s.cover_key)}" alt="" loading="lazy"
         referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'"><span><b>${esc(s.title)}</b>
-        <span class="muted">${esc(s.sub)}</span><strong>${label}${metric ? " · " + metric : ""}</strong>
-        <small>${plays}${run ? " consecutive" : ""} · ${fmt(s.ms)} · ${when}</small></span></button></li>`);
+        <span class="muted">${esc(s.sub)}</span><strong>${label}</strong>
+        <small>${plays}${mode === "runs" ? " consecutive" : ""} · ${fmt(s.ms)} · ${when}</small></span></button></li>`);
     };
-    kinds.forEach(([key, label, kind]) => {
-      const byPlays = set?.[key]?.plays, byMinutes = set?.[key]?.minutes;
-      if (same(byPlays, byMinutes)) add(byMinutes, label, kind, "Most plays & time");
-      else {
-        add(byMinutes, label, kind, "Most time");
-        add(byPlays, label, kind, "Most plays");
-      }
-    });
+    kinds.forEach(([key, label, kind]) => add(set?.[key], label, kind));
     return rows.length ? `<ol class="tt-list">${rows.join("")}</ol>`
-      : `<p class="muted">${run ? "No repeated songs, artists, or albums here." : "No dated listening here."}</p>`;
+      : `<p class="muted">${mode === "runs" ? "No repeated songs, albums, or artists here." : "No dated listening here."}</p>`;
   };
-  return `<div><h3>Longest streaks ${esc(scope)}</h3><div class="ins-grid">${d.streaks.map(s => `
-    <div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(s.pid)}"><b>${esc(pname(s.pid))}</b></p>` : ""}
-      <p class="sub-h">Biggest single day</p>${records(s.days, false)}
-      <p class="sub-h">Longest consecutive run</p>${records(s.runs, true)}
-    </div>`).join("")}</div></div>`;
+  const tabs = `<div class="tabs tt-tabs" role="tablist" aria-label="Streak period">${STREAK_MODES.map(([mode, label]) =>
+    `<button type="button" role="tab" data-streak-mode="${mode}" aria-selected="${mode === streakMode}">${label}</button>`).join("")}</div>`;
+  const panels = STREAK_MODES.map(([mode]) => `<div data-streak-panel="${mode}" ${mode === streakMode ? "" : "hidden"}>
+    <div class="ins-grid">${d.streaks.map(s => `<div>${META.people.length > 1
+      ? `<p class="who-h" style="--c:${color(s.pid)}"><b>${esc(pname(s.pid))}</b></p>` : ""}${records(s[mode], mode)}</div>`).join("")}</div>
+    </div>`).join("");
+  return `<div><h3>Longest streaks ${esc(scope)}</h3>${tabs}${panels}</div>`;
 }
 
 function insHeat(d) {
@@ -1025,6 +1024,14 @@ $("gap").addEventListener("change", e => { state.gap = +e.target.value; syncUI()
 $("copy").addEventListener("click", copyPlaylist);
 $("insights").addEventListener("toggle", () => { if ($("insights").open) loadInsights(); });
 $("insights-body").addEventListener("click", e => {
+  const streak = e.target.closest("[data-streak-mode]");
+  if (streak) {
+    streakMode = streak.dataset.streakMode;
+    const root = streak.closest('[data-sec="streaks"]');
+    root.querySelectorAll("[data-streak-mode]").forEach(b => b.setAttribute("aria-selected", String(b === streak)));
+    root.querySelectorAll("[data-streak-panel]").forEach(p => { p.hidden = p.dataset.streakPanel !== streakMode; });
+    return;
+  }
   const replay = e.target.closest(".replay");
   if (replay) return animateCompat(replay.closest(".compat"));
   const open = e.target.closest("[data-open-key]");

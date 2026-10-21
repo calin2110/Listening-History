@@ -1717,25 +1717,21 @@ class Library:
         places = defaultdict(lambda: [0, 0, Counter()])
         levels = {"songs": self.levels["track"], "artists": self.levels["artist"],
                   "albums": self.levels["album"]}
+        streak_modes = ("runs", "days", "weeks", "months")
         current = {pid: {name: None for name in levels} for pid in sel}
         daily = {pid: {name: defaultdict(lambda: [0, 0]) for name in levels} for pid in sel}
-        records = {pid: {mode: {name: {"plays": None, "minutes": None} for name in levels}
-                         for mode in ("days", "runs")} for pid in sel}
+        records = {pid: {mode: {name: None for name in levels} for mode in streak_modes} for pid in sel}
 
-        def consider(best, rec):
-            """Keep both definitions of longest: most plays and most listening time."""
-            for metric, score in (("plays", (rec["plays"], rec["ms"])),
-                                  ("minutes", (rec["ms"], rec["plays"]))):
-                old = best[metric]
-                old_score = ((old["plays"], old["ms"]) if metric == "plays" else
-                             (old["ms"], old["plays"])) if old else None
-                if old_score is None or score > old_score:
-                    best[metric] = rec.copy()
+        def consider(pid, mode, name, rec):
+            """Keep the longest listening-time record, using play count to break ties."""
+            old = records[pid][mode][name]
+            if old is None or (rec["ms"], rec["plays"]) > (old["ms"], old["plays"]):
+                records[pid][mode][name] = rec.copy()
 
         def close_run(pid, name):
             run = current[pid][name]
             if run and run["plays"] >= 2:
-                consider(records[pid]["runs"][name], run)
+                consider(pid, "runs", name, run)
 
         for i in range(lo, hi):
             t, tid, pid, src, ms, _, place, _ = self.raw[i]
@@ -1770,8 +1766,19 @@ class Library:
         for pid in sel:
             for name in levels:
                 close_run(pid, name)
+                grouped = {"weeks": defaultdict(lambda: [0, 0]),
+                           "months": defaultdict(lambda: [0, 0])}
                 for (day, gid), (plays, ms) in daily[pid][name].items():
-                    consider(records[pid]["days"][name], {"gid": gid, "plays": plays, "ms": ms, "day": day})
+                    consider(pid, "days", name, {"gid": gid, "plays": plays, "ms": ms, "day": day})
+                    date = datetime.fromordinal(day)
+                    buckets = {"weeks": day - date.weekday(), "months": date.replace(day=1).toordinal()}
+                    for mode, bucket in buckets.items():
+                        total = grouped[mode][(bucket, gid)]
+                        total[0] += plays
+                        total[1] += ms
+                for mode, totals in grouped.items():
+                    for (day, gid), (plays, ms) in totals.items():
+                        consider(pid, mode, name, {"gid": gid, "plays": plays, "ms": ms, "day": day})
 
         def record_item(name, rec, run):
             if rec is None:
@@ -1786,10 +1793,8 @@ class Library:
             return out
 
         def formatted_records(pid):
-            return {mode: {name: {metric: record_item(name, rec, mode == "runs")
-                                  for metric, rec in records[pid][mode][name].items()}
-                           for name in levels}
-                    for mode in ("days", "runs")}
+            return {mode: {name: record_item(name, records[pid][mode][name], mode == "runs")
+                           for name in levels} for mode in streak_modes}
 
         top_places = sorted(places.items(), key=lambda kv: -kv[1][0])[:12]
         return {
