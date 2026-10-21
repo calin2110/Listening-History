@@ -2,6 +2,10 @@
 
 Every future feature or behavior change must add a brief one-line entry here.
 
+## 2026-10-21
+
+- Song, artist, and album streak records — Shows biggest single-day totals and longest consecutive runs by plays and listening time.
+
 ## 2026-10-17
 
 - Faster insights — Loads independent insight sections concurrently so quick results appear first.

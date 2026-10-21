@@ -33,7 +33,8 @@ API (all GET, JSON unless noted). Common parameters:
                         p<id>|climb|skip_hi|skip_lo
   /api/detail     ?k=<key>: timeline, per-person stats and (for artists and
                   albums) top tracks of one item
-  /api/insights   taste match, streaks, listening clock, places
+  /api/insights   taste match, daily/consecutive song, artist and album records,
+                  listening clock, places
   /api/fun        per person: badges, top songs/artists, biggest day, longest
                   streak and the top song of each period ("eras"); era=day|month|
                   quarter|half|year (default month)
@@ -1712,20 +1713,29 @@ class Library:
     def _insights(self, lo_ts, hi_ts, sel, by, half_s, ref, minplay_ms):
         lo, hi = self._span(lo_ts, hi_ts)
         selset = set(sel)
-        artist_of = self.levels["artist"].of_track
         clock = {pid: [0] * 168 for pid in sel}
         places = defaultdict(lambda: [0, 0, Counter()])
-        best_song = {pid: {} for pid in sel}            # pid -> {tid: (len, start, end, ms)}
-        best_art = {pid: {} for pid in sel}
-        cur = {pid: [None, 0, 0.0, 0.0, 0, None, 0, 0.0, 0.0, 0] for pid in sel}
-        # cur: [tid, len, start, end, ms, artist, alen, astart, aend, ams]
+        levels = {"songs": self.levels["track"], "artists": self.levels["artist"],
+                  "albums": self.levels["album"]}
+        current = {pid: {name: None for name in levels} for pid in sel}
+        daily = {pid: {name: defaultdict(lambda: [0, 0]) for name in levels} for pid in sel}
+        records = {pid: {mode: {name: {"plays": None, "minutes": None} for name in levels}
+                         for mode in ("days", "runs")} for pid in sel}
 
-        def close(table, key, length, start, end, ms):
-            if key is None or length < 2:
-                return
-            old = table.get(key)
-            if not old or length > old[0]:
-                table[key] = (length, start, end, ms)
+        def consider(best, rec):
+            """Keep both definitions of longest: most plays and most listening time."""
+            for metric, score in (("plays", (rec["plays"], rec["ms"])),
+                                  ("minutes", (rec["ms"], rec["plays"]))):
+                old = best[metric]
+                old_score = ((old["plays"], old["ms"]) if metric == "plays" else
+                             (old["ms"], old["plays"])) if old else None
+                if old_score is None or score > old_score:
+                    best[metric] = rec.copy()
+
+        def close_run(pid, name):
+            run = current[pid][name]
+            if run and run["plays"] >= 2:
+                consider(records[pid]["runs"][name], run)
 
         for i in range(lo, hi):
             t, tid, pid, src, ms, _, place, _ = self.raw[i]
@@ -1739,44 +1749,47 @@ class Library:
                 pl[0] += ms
                 pl[1] += 1
                 pl[2][tid] += ms
-            c = cur[pid]
-            if tid == c[0]:
-                c[1] += 1
-                c[3] = t
-                c[4] += ms
-            else:
-                close(best_song[pid], c[0], c[1], c[2], c[3], c[4])
-                c[0:5] = [tid, 1, t, t, ms]
-            aid = artist_of[tid]
-            if aid == c[5]:
-                c[6] += 1
-                c[8] = t
-                c[9] += ms
-            else:
-                close(best_art[pid], c[5], c[6], c[7], c[8], c[9])
-                c[5:10] = [aid, 1, t, t, ms]
-        for pid in sel:
-            c = cur[pid]
-            close(best_song[pid], c[0], c[1], c[2], c[3], c[4])
-            close(best_art[pid], c[5], c[6], c[7], c[8], c[9])
-
-        art = self.levels["artist"]
-
-        def fmt_streaks(table, is_artist):
-            top = sorted(table.items(), key=lambda kv: (-kv[1][0], -kv[1][3]))[:8]
-            out = []
-            for key, (length, start, end, ms) in top:
-                if is_artist:
-                    out.append({"key": art.keys[key], "title": art.title[key], "sub": "",
-                                "cover_key": self.keys[art.members[key][0]],
-                                "len": length, "start": iso_day(start), "end": iso_day(end), "ms": ms,
-                                "start_ts": start, "end_ts": end})
+            if not t:
+                continue
+            day = self.lday[i]
+            for name, lvl in levels.items():
+                gid = lvl.of_track[tid]
+                run = current[pid][name]
+                if gid >= 0 and run and run["gid"] == gid:
+                    run["plays"] += 1
+                    run["end"] = t
+                    run["ms"] += ms
                 else:
-                    out.append({"key": self.keys[key], "title": self.display[key][1], "sub": self.display[key][0],
-                                "cover_key": self.keys[key],
-                                "len": length, "start": iso_day(start), "end": iso_day(end), "ms": ms,
-                                "start_ts": start, "end_ts": end})
+                    close_run(pid, name)
+                    current[pid][name] = ({"gid": gid, "plays": 1, "start": t, "end": t, "ms": ms,
+                                           "day": day} if gid >= 0 else None)
+                if day and gid >= 0:
+                    total = daily[pid][name][(day, gid)]
+                    total[0] += 1
+                    total[1] += ms
+        for pid in sel:
+            for name in levels:
+                close_run(pid, name)
+                for (day, gid), (plays, ms) in daily[pid][name].items():
+                    consider(records[pid]["days"][name], {"gid": gid, "plays": plays, "ms": ms, "day": day})
+
+        def record_item(name, rec, run):
+            if rec is None:
+                return None
+            lvl, gid = levels[name], rec["gid"]
+            tid = gid if name == "songs" else lvl.members[gid][0]
+            out = {"key": lvl.keys[gid], "title": lvl.title[gid], "sub": lvl.sub[gid],
+                   "cover_key": self.keys[tid], "plays": rec["plays"], "ms": rec["ms"],
+                   "date": datetime.fromordinal(rec["day"]).strftime("%Y-%m-%d")}
+            if run:
+                out.update({"start_ts": rec["start"], "end_ts": rec["end"]})
             return out
+
+        def formatted_records(pid):
+            return {mode: {name: {metric: record_item(name, rec, mode == "runs")
+                                  for metric, rec in records[pid][mode][name].items()}
+                           for name in levels}
+                    for mode in ("days", "runs")}
 
         top_places = sorted(places.items(), key=lambda kv: -kv[1][0])[:12]
         return {
@@ -1788,8 +1801,7 @@ class Library:
                         "top": {"title": self.display[v[2].most_common(1)[0][0]][1],
                                 "sub": self.display[v[2].most_common(1)[0][0]][0]}}
                        for pl, v in top_places],
-            "streaks": [{"pid": pid, "songs": fmt_streaks(best_song[pid], False),
-                         "artists": fmt_streaks(best_art[pid], True)} for pid in sel],
+            "streaks": [{"pid": pid, **formatted_records(pid)} for pid in sel],
         }
 
     def meta(self):

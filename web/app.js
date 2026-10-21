@@ -442,7 +442,7 @@ const INS_EP = {
   music: ["music"], albums: ["albums"], taste: ["extras", () => ({part: "taste"})], sync: ["extras", () => ({part: "sync"})],
   unusual: ["extras", () => ({part: "unusual"})],
 };
-const INS_TABS = [["together", "🤝 Together"], ["you", "🪪 You"], ["clock", "🕐 Clock"], ["sessions", "🎧 Sessions"],
+const INS_TABS = [["together", "🤝 Together"], ["you", "🪪 You"], ["streaks", "🔥 Streaks"], ["clock", "🕐 Clock"], ["sessions", "🎧 Sessions"],
                   ["calendar", "📅 Calendar"], ["time", "⏳ Through time"], ["albums", "💿 Albums"],
                   ["music", "🎸 Your music"], ["words", "🔤 Words & letters"], ["places", "🌍 Places"]];
 const OLD_TABS = {overview: "together", habits: "clock"};          // links saved before the tabs were split
@@ -466,7 +466,7 @@ const INS_SECTIONS = [
   ["calendar", "calendar", ["more"], D => fnOk("renderCalendar") ? renderCalendar(D.more) : ""],
   ["eras", "time", ["fun"], D => (typeof renderFunSections === "function" ? renderFunSections(D.fun)[1] : "") || ""],
   ["timetravel", "time", ["time"], D => fnOk("renderTimeTravel") ? renderTimeTravel(D.time) : ""],
-  ["streaks", "time", ["insights"], D => insStreaks(D.insights)],
+  ["streaks", "streaks", ["insights"], D => insStreaks(D.insights)],
   ["albums", "albums", ["albums"], D => fnOk("renderAlbums") ? renderAlbums(D.albums) : ""],
   ["genres", "music", ["music"], D => fnOk("renderMusic") ? renderMusic(D.music) : ""],
   ["lovehate", "music", ["more"], D => fnOk("renderLoveHate") ? renderLoveHate(D.more) : ""],
@@ -572,14 +572,36 @@ function insCompat(d) {
 
 function insStreaks(d) {
   const scope = state.view === "rediscover" ? "over the whole history" : frameLabel();
-  const streakList = (list, kind) => list.length
-    ? `<ul class="streaks">${list.slice(0, 5).map(s => `<li><b>×${s.len}</b><span>${esc(s.title)}
-        <small>${kind === "song" ? esc(s.sub) + " · " : ""}${streakWhen(s)} · ${fmt(s.ms)}</small></span></li>`).join("")}</ul>`
-    : `<p class="muted">No ${kind} played twice in a row here.</p>`;
+  const kinds = [["songs", "Song", "track"], ["albums", "Album", "album"], ["artists", "Artist", "artist"]];
+  const same = (a, b) => a && b && a.key === b.key && a.date === b.date && a.start_ts === b.start_ts
+    && a.plays === b.plays && a.ms === b.ms;
+  const records = (set, run) => {
+    const rows = [];
+    const add = (s, label, kind, metric) => {
+      if (!s) return;
+      const plays = `${s.plays.toLocaleString()} ${s.plays === 1 ? "play" : "plays"}`;
+      const when = run ? streakWhen(s) : `on ${niceDay(s.date)}`;
+      rows.push(`<li><button type="button" data-open-key="${esc(s.key)}" data-kind="${kind}"
+        data-title="${esc(s.title)}" data-sub="${esc(s.sub)}"><img src="/api/cover?k=${enc(s.cover_key)}" alt="" loading="lazy"
+        referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'"><span><b>${esc(s.title)}</b>
+        <span class="muted">${esc(s.sub)}</span><strong>${label}${metric ? " · " + metric : ""}</strong>
+        <small>${plays}${run ? " consecutive" : ""} · ${fmt(s.ms)} · ${when}</small></span></button></li>`);
+    };
+    kinds.forEach(([key, label, kind]) => {
+      const byPlays = set?.[key]?.plays, byMinutes = set?.[key]?.minutes;
+      if (same(byPlays, byMinutes)) add(byMinutes, label, kind, "Most plays & time");
+      else {
+        add(byMinutes, label, kind, "Most time");
+        add(byPlays, label, kind, "Most plays");
+      }
+    });
+    return rows.length ? `<ol class="tt-list">${rows.join("")}</ol>`
+      : `<p class="muted">${run ? "No repeated songs, artists, or albums here." : "No dated listening here."}</p>`;
+  };
   return `<div><h3>Longest streaks ${esc(scope)}</h3><div class="ins-grid">${d.streaks.map(s => `
     <div>${META.people.length > 1 ? `<p class="who-h" style="--c:${color(s.pid)}"><b>${esc(pname(s.pid))}</b></p>` : ""}
-      <p class="muted">Same song, back to back</p>${streakList(s.songs, "song")}
-      <p class="muted">Same artist, back to back</p>${streakList(s.artists, "artist")}
+      <p class="sub-h">Biggest single day</p>${records(s.days, false)}
+      <p class="sub-h">Longest consecutive run</p>${records(s.runs, true)}
     </div>`).join("")}</div></div>`;
 }
 
@@ -1006,7 +1028,7 @@ $("insights-body").addEventListener("click", e => {
   const replay = e.target.closest(".replay");
   if (replay) return animateCompat(replay.closest(".compat"));
   const open = e.target.closest("[data-open-key]");
-  if (open) openDetail({key: open.dataset.openKey, cover_key: open.dataset.openKey, kind: "track",
+  if (open) openDetail({key: open.dataset.openKey, cover_key: open.dataset.openKey, kind: open.dataset.kind || "track",
                         title: open.dataset.title, sub: open.dataset.sub});
 });
 
