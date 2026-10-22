@@ -59,6 +59,8 @@ API (all GET, JSON unless noted). Common parameters:
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
   /api/extras     part=taste|sync|unusual (default: all). per person: A–Z of artists, title words (dark vs light), one-hit wonders;
                   per pair: telepathy (same song within an hour, out of nowhere), most in-sync day
+  /api/moods      per person: song moods (from lyrics) overall, by time of day, season and month;
+                  the words you hear most in lyrics, lyric records
   /api/roulette   ?people=<id>: random songs you loved but haven't played in over a year
   /api/versus     ?a=&b=&artist=: two people, one artist: rounds, who owns which song, timelines;
                   without artist: suggested close fights
@@ -551,6 +553,7 @@ class Library:
         self.more = lru_cache(maxsize=16)(self._more)
         self.match = lru_cache(maxsize=32)(self._match)
         self.extras = lru_cache(maxsize=16)(self._extras)
+        self.lyrics_stats = lru_cache(maxsize=16)(self._lyrics_stats)
         self._albums_key = None
 
     # -------------------------------------------------------- aggregation --
@@ -2962,6 +2965,230 @@ def _unusual(self, lo, hi, pid, minplay_ms, limit=30):
 Library._extras, Library._sync_pair, Library._roulette, Library._unusual = _extras, _sync_pair, _roulette, _unusual
 
 
+# ------------------------------------------------------------------- moods --
+# Song moods come from the lyrics (lrclib.net, the same source as the lyrics popup): a background
+# thread fetches the lyrics of the songs you play most, politely (one song at a time, with a pause),
+# and keeps them in lyrics_cache.json. Each song gets a mood mix from a small word list per mood,
+# in English and German (other languages are recognised and left without a mood).
+
+MOODS = (("sad", "Heartbreak", "💔"), ("angry", "Rage", "😡"), ("dark", "Darkness", "🖤"), ("love", "Love", "❤️"),
+         ("party", "Party", "🎉"), ("hope", "Hope", "🌅"), ("defiant", "Defiance", "💪"))
+_MOOD_WORDS = {
+    "sad": """sad sadness cry cries crying cried tears tear alone lonely loneliness goodbye goodbyes miss missing
+        lost lose losing broken heartbreak heartache hurt hurts hurting empty sorrow regret regrets grief sorry apart
+        gone fade fading faded cold colder wept weep mourn mourning numb tired hollow ache aching memories memory
+        remember forgotten forget leaving left rain falling fall fell
+        traurig weinen tränen allein einsam vermissen verloren schmerz kalt leer vergessen abschied""",
+    "angry": """hate hated hatred rage raging fight fighting fought kill killing killed scream screaming screamed war
+        burn burning revenge anger angry fury furious destroy destroyed destruction violence violent enemy enemies
+        fuck fucking damn bitch smash crush break breaking bullet bullets gun guns knife blade attack beast
+        hass hassen wut krieg kampf töten zerstören feuer brennen rache""",
+    "dark": """death dead die dying darkness dark hell demon demons devil grave graves blood bleed bleeding nightmare
+        nightmares shadow shadows evil curse cursed coffin sin sins sinner abyss doom ghost ghosts haunt haunted
+        poison venom corpse funeral bury buried decay rot rotting grim reaper serpent satan wicked
+        tod tot sterben blut hölle teufel dunkel dunkelheit grab schatten böse sünde""",
+    "love": """love loved loving lover lovers heart hearts kiss kisses kissing baby darling honey hold holding touch
+        together forever beautiful desire mine yours sweet sweetheart embrace romance tender babe
+        liebe lieben liebst herz küss küssen kuss schatz zusammen""",
+    "party": """dance dancing danced party tonight drink drinking drunk club fun wild shake celebrate crazy music
+        move moving groove jump bounce weekend dj beat beats floor bottle shots
+        tanz tanzen party trinken feiern""",
+    "hope": """hope hoping light sun sunshine rise rising free freedom dream dreams dreaming peace home believe sky
+        heaven morning smile smiling heal healing shine shining better tomorrow alive bright golden wings fly
+        hoffnung licht sonne frei freiheit traum träume himmel morgen leben""",
+    "defiant": """stand standing strong stronger power powerful survive surviving survivor control unbreakable
+        rebel rebellion riot resist king kings queen crown throne glory victory win winning warrior warriors
+        louder never conquer unstoppable fearless defy defiant march army legion pride
+        stark stärker kämpfen niemals sieg macht""",
+}
+MOOD_LEX = {}
+for _m, _ws in _MOOD_WORDS.items():
+    for _w in _ws.split():
+        MOOD_LEX.setdefault(_w, []).append(_m)
+_LANG_STOP = {
+    "en": set("the and you i to a me my it is in of that your on we be for this all so what with no don't not are".split()),
+    "de": set("ich und die der du nicht das ist ein mich mir es zu sie wir in dich dir den so auf mit was sein".split()),
+    "pl": set("i nie się to w na jest że mnie ja ty jak co tak mi już do czy by ale".split()),
+    "ro": set("și nu în că eu tu mă ce pe la cu o un de să e te mai sunt".split()),
+    "es": set("y que de no el la en me te lo mi tu es un una por con se yo".split()),
+    "fr": set("je et le la les tu de que pas un une est dans mon ne me te pour".split()),
+}
+LYRIC_STOP = TITLE_STOP | set().union(*_LANG_STOP.values()) | set("""ooh oh ah uh hey yeah whoa na la da ya
+    i'll i've i'd you'll you've you'd we'll we're they're there's that's what's ain't gonna wanna gotta cause
+    'cause em im ive youre its dont cant wont didnt doesnt isnt wasnt aint one two now never ever every
+    some more only than then there here their they them been have has had was were would could should
+    can will just like got get know see say said tell make made come go going gone take way back still
+    ich du er sie es wir ihr nicht und oder aber den dem des ein eine einen einem mein dein sein kein noch
+    nur schon auch wie wo wenn dann denn doch hab habe hat bin bist sind war will kann""".split())
+
+
+def analyze_lyrics(text):
+    """{lang, inst, n, uniq, words: {word: count} (top 80), mood: {mood: share}} for one song's lyrics."""
+    if not text:
+        return None
+    if text.strip() == "This track is instrumental.":
+        return {"inst": True, "lang": None, "n": 0, "uniq": 0, "words": {}, "mood": {}}
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", text.lower())
+    if not words:
+        return None
+    counts = Counter(words)
+    lang = max(_LANG_STOP, key=lambda l: sum(counts[w] for w in _LANG_STOP[l]))
+    hits = Counter()
+    if lang in ("en", "de"):
+        for w, c in counts.items():
+            for m in MOOD_LEX.get(w, ()):
+                hits[m] += min(c, 4)                   # a chorus repeated ten times counts a bit, not ten times
+    tot = sum(hits.values())
+    mood = {m: round(v / tot, 3) for m, v in hits.items()} if tot >= 3 else {}
+    top = Counter({w: c for w, c in counts.items() if len(w) > 2 and w not in LYRIC_STOP}).most_common(80)
+    return {"inst": False, "lang": lang, "n": len(words), "uniq": len(counts), "words": dict(top), "mood": mood}
+
+
+class MoodStore:
+    PAUSE = 1.5                                        # seconds between songs: lrclib is a free community service
+
+    def __init__(self, lib, lyrics):
+        self.lib, self.lyrics = lib, lyrics
+        self.cache = {}                                # track key -> analysis (or None: no lyrics)
+        self.lock = threading.Lock()
+        self.running, self.version = False, 0
+        plays = Counter(p[1] for p in lib.all_raw if p[4] >= 30_000)
+        self.order = [tid for tid, n in plays.most_common() if n >= 3]     # songs worth looking up, most played first
+
+    def song(self, tid):
+        """The analysis for a song, if its lyrics have been looked up."""
+        key = self.lib.keys[tid]
+        with self.lock:
+            if key in self.cache:
+                return self.cache[key]
+        hit, text = self.lyrics.get(key)
+        if not hit:
+            return None
+        a = analyze_lyrics(text)
+        with self.lock:
+            self.cache[key] = a
+        return a
+
+    def start(self):
+        self.running = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def progress(self):
+        done = sum(1 for tid in self.order if self.lyrics.get(self.lib.keys[tid])[0])
+        return {"done": done, "total": len(self.order), "running": self.running}
+
+    def _run(self):
+        n = 0
+        for tid in self.order:
+            key = self.lib.keys[tid]
+            if self.lyrics.get(key)[0]:
+                continue
+            artist, title = self.lib.display[tid]
+            try:
+                text = lookup_lyrics(artist, title)
+            except Exception:
+                time.sleep(30)                         # offline or rate-limited: back off, try the next one later
+                continue
+            self.lyrics.set(key, text)
+            with self.lock:
+                self.cache.pop(key, None)
+            n += 1
+            if n % 25 == 0:
+                self.version += 1                      # lets cached mood stats refresh as more songs come in
+                self.lyrics.save()
+            time.sleep(self.PAUSE)
+        self.version += 1
+        self.lyrics.save()
+        self.running = False
+
+
+def mood_mix(store, tids_plays):
+    """Weighted mood shares over (track, plays) pairs, plus the share of plays that had a mood."""
+    acc, with_mood, total = Counter(), 0, 0
+    for tid, n in tids_plays:
+        total += n
+        a = store.song(tid)
+        if a and a["mood"]:
+            with_mood += n
+            for m, v in a["mood"].items():
+                acc[m] += v * n
+    return ({m: round(acc[m] / with_mood, 4) for m, _, _ in MOODS} if with_mood else {}), with_mood, total
+
+
+def _lyrics_stats(self, lo_ts, hi_ts, sel, minplay_ms, store, version):
+    """Moods and lyrics words for each person: mood mix, top songs per mood, moods by time of day,
+    by season and by month, the words you hear most, and a few lyric records."""
+    lo, hi = self._span(lo_ts, hi_ts)
+    people = []
+    for pid in sel:
+        plays, by_part, by_season, by_month = Counter(), [Counter() for _ in DAYPARTS], [Counter() for _ in range(4)], defaultdict(Counter)
+        for i in range(lo, hi):
+            t, tid, p, src, ms = self.raw[i][:5]
+            if p != pid or ms < minplay_ms or not t:
+                continue
+            plays[tid] += 1
+            if self.how[i] != 255:
+                by_part[(self.how[i] % 24) // 3][tid] += 1
+            d = datetime.fromordinal(self.lday[i])
+            by_season[(d.month % 12) // 3][tid] += 1
+            by_month[f"{d.year:04d}-{d.month:02d}"][tid] += 1
+        mix, with_mood, total = mood_mix(store, plays.items())
+
+        per_mood = defaultdict(list)
+        words, heard, vocab, langs, inst = Counter(), 0, set(), Counter(), 0
+        wordy, repetitive, analysed = [], [], 0
+        for tid, n in plays.items():
+            a = store.song(tid)
+            if not a:
+                continue
+            analysed += n
+            if a["inst"]:
+                inst += n
+                continue
+            langs[a["lang"]] += n
+            heard += a["n"] * n
+            vocab.update(a["words"])
+            for w, c in a["words"].items():
+                words[w] += min(c, 3) * n               # repeated choruses don't drown out everything else
+            if a["mood"]:
+                m, share = max(a["mood"].items(), key=lambda kv: kv[1])
+                per_mood[m].append((n, share, tid))
+            if a["n"] >= 80:
+                wordy.append((a["n"], tid))
+                repetitive.append((a["uniq"] / a["n"], tid, a))
+        moods_top = {m: [self._song(tid, plays=n, share=share) for n, share, tid in sorted(v, reverse=True)[:12]]
+                     for m, v in per_mood.items()}
+        wordy.sort(reverse=True)
+        repetitive.sort(key=lambda x: x[0])
+        parts = []
+        for b, (part_id, name, emoji) in enumerate(DAYPARTS):
+            mx, wm, tot = mood_mix(store, by_part[b].items())
+            parts.append({"id": part_id, "name": name, "emoji": emoji, "mix": mx, "plays": tot, "with_mood": wm})
+        seasons = []
+        for s, (sid, name, emoji) in enumerate(self.SEASONS):
+            mx, wm, tot = mood_mix(store, by_season[s].items())
+            seasons.append({"id": sid, "name": name, "emoji": emoji, "mix": mx, "plays": tot, "with_mood": wm})
+        months = []
+        for k in sorted(by_month):
+            mx, wm, tot = mood_mix(store, by_month[k].items())
+            if wm >= 10:
+                months.append({"month": k, "mix": mx, "with_mood": wm})
+        people.append({
+            "pid": pid, "plays": total, "with_mood": with_mood, "analysed": analysed, "mix": mix, "top": moods_top,
+            "parts": parts, "seasons": seasons, "months": months,
+            "words": [{"word": w, "n": c} for w, c in words.most_common(60)],
+            "heard": heard, "vocab": len(vocab), "instrumental": inst,
+            "langs": [{"lang": l, "plays": c} for l, c in langs.most_common()],
+            "wordiest": [self._song(tid, words=n) for n, tid in wordy[:5]],
+            "repetitive": [self._song(tid, words=a["n"], unique=a["uniq"]) for r, tid, a in repetitive[:5]],
+        })
+    return {"moods": [{"id": m, "name": n, "emoji": e} for m, n, e in MOODS], "people": people,
+            "progress": store.progress()}
+
+
+Library._lyrics_stats = _lyrics_stats
+
+
 # ------------------------------------------------------------------ versus --
 # Two people, one artist: who's the bigger fan? A few rounds (plays, hours, songs, fan since,
 # streak, biggest day, loyalty, lately), who owns which song, and both timelines.
@@ -3216,7 +3443,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
                 "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/albums": self.api_albums, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
                 "/api/concerts": self.api_concerts, "/api/concert": self.api_concert, "/api/versus": self.api_versus,
-                "/api/extras": self.api_extras, "/api/roulette": self.api_roulette,
+                "/api/extras": self.api_extras, "/api/roulette": self.api_roulette, "/api/moods": self.api_moods,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
             }.get(url.path)
             if route:
@@ -3308,6 +3535,11 @@ class Handler(BaseHTTPRequestHandler):
         d = self.lib.detail(qs.get("k", ""), c["frm"], c["to"], c["people"], c["minplay_s"])
         if d is None:
             return self.send_json({"error": "Unknown item"}, 404)
+        lvl, gid = self.lib.key_index[qs.get("k", "")]
+        tids = lvl.members[gid] if lvl.name != "track" else [gid]
+        mix, with_mood, _ = mood_mix(self.moods, [(t, max(1, len(self.lib.track_plays[t]))) for t in tids])
+        if mix:
+            d["mood"] = {"mix": mix, "moods": [{"id": m, "name": n, "emoji": e} for m, n, e in MOODS]}
         self.send_json(d)
 
     def api_fun(self, qs):
@@ -3391,6 +3623,11 @@ class Handler(BaseHTTPRequestHandler):
             raise BadParam("part must be taste, sync, unusual or all")
         self.send_json(self.lib.extras(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
                                        int(c["minplay_s"] * 1000), part))
+
+    def api_moods(self, qs):
+        c = self.common(qs)
+        self.send_json(self.lib.lyrics_stats(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
+                                             int(c["minplay_s"] * 1000), self.moods, self.moods.version))
 
     def api_roulette(self, qs):
         c = self.common(qs)
@@ -3601,6 +3838,9 @@ def main():
     ap.add_argument("--meta-cache", default="meta_cache.json", help="genres, years, lengths, previews")
     ap.add_argument("--hidden", default="hidden_artists.json", help="artists left out of all stats (edited from the page)")
     ap.add_argument("--concerts", default="concerts.json", help="your upcoming concerts (edited from the page)")
+    ap.add_argument("--no-lyrics-scan", action="store_true",
+                    help="don't fetch lyrics in the background (song moods and lyric words then only cover "
+                         "songs whose lyrics you opened)")
     ap.add_argument("--no-music-info", action="store_true", help="don't look up genres/years/previews in the background")
     ap.add_argument("--strict", action="store_true",
                     help="exact name matching (don't merge 'feat.'/'Remastered'/accent variants)")
@@ -3647,6 +3887,9 @@ def main():
     Handler.cover_files = CoverFiles(args.covers_dir)
     Handler.lyrics = JsonCache(args.lyrics_cache)
     Handler.meta = MetaStore(lib, args.meta_cache)
+    Handler.moods = MoodStore(lib, Handler.lyrics)
+    if not args.no_lyrics_scan:
+        Handler.moods.start()
     Handler.concerts = ConcertStore(args.concerts)
     Handler.concert_cache = JsonCache("concert_cache.json")
     for k in [k for k in Handler.concert_cache.data if k.startswith("set:")]:   # never keep setlists around

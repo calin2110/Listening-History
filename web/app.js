@@ -440,15 +440,16 @@ const insKey = () => JSON.stringify({...baseParams(), era: state.era, hidden: (M
 const INS_EP = {
   insights: ["insights"], fun: ["fun", () => ({era: state.era})], time: ["time"], clock: ["clock"], more: ["more"],
   music: ["music"], albums: ["albums"], taste: ["extras", () => ({part: "taste"})], sync: ["extras", () => ({part: "sync"})],
-  unusual: ["extras", () => ({part: "unusual"})],
+  unusual: ["extras", () => ({part: "unusual"})], moods: ["moods"],
 };
-const INS_TABS = [["together", "🤝 Together"], ["you", "🪪 You"], ["streaks", "🔥 Streaks"], ["clock", "🕐 Clock"], ["sessions", "🎧 Sessions"],
+const INS_TABS = [["together", "🤝 Together"], ["you", "🪪 You"], ["moods", "🎭 Moods"], ["streaks", "🔥 Streaks"], ["clock", "🕐 Clock"], ["sessions", "🎧 Sessions"],
                   ["calendar", "📅 Calendar"], ["time", "⏳ Through time"], ["albums", "💿 Albums"],
                   ["music", "🎸 Your music"], ["words", "🔤 Words & letters"], ["places", "🌍 Places"]];
 const OLD_TABS = {overview: "together", habits: "clock"};          // links saved before the tabs were split
 const two = () => state.people.length > 1;
 const fnOk = name => typeof window[name] === "function";
-// [id, tab, endpoints it needs, render(data) -> html, shown only when]
+// [id, tab, endpoints it needs, render(data) -> html, shown only when, endpoints it uses if they're there]
+// (a section with that last list is drawn once its own data is in, and drawn again when the extra data arrives)
 const INS_SECTIONS = [
   ["compat", "together", ["insights"], D => insCompat(D.insights), two],
   ["telepathy", "together", ["sync"], D => fnOk("renderTelepathy") ? renderTelepathy(D.sync) : "", two],
@@ -457,21 +458,26 @@ const INS_SECTIONS = [
     ? renderAwards({d: D.insights, f: D.fun, t: D.time, c: D.clock, m: D.more, mu: D.music}) : "", two],
   ["personality", "you", ["fun"], D => (typeof renderFunSections === "function" ? renderFunSections(D.fun)[0] : "") || ""],
   ["milestones", "you", ["more"], D => fnOk("renderMilestones") ? renderMilestones(D.more) : ""],
-  ["clock", "clock", ["clock"], D => fnOk("renderClock") ? renderClock(D.clock) : ""],
+  ["moodmix", "moods", ["moods"], D => fnOk("renderMoodMix") ? renderMoodMix(D.moods) : ""],
+  ["clock", "clock", ["clock"], D => fnOk("renderClock") ? renderClock(D.clock) : "", null, ["moods"]],
+  ["moodclock", "clock", ["moods"], D => fnOk("renderMoodClock") ? renderMoodClock(D.moods) : ""],
   ["heat", "clock", ["insights"], D => insHeat(D.insights)],
   ["sessions", "sessions", ["more"], D => fnOk("renderSessions") ? renderSessions(D.more) : ""],
   ["unusual", "sessions", ["unusual"], D => fnOk("renderUnusual") ? renderUnusual(D.unusual) : ""],
   ["modes", "sessions", ["more"], D => fnOk("renderModes") ? renderModes(D.more) : ""],
   ["devices", "sessions", ["more"], D => fnOk("renderDevices") ? renderDevices(D.more) : ""],
-  ["calendar", "calendar", ["more"], D => fnOk("renderCalendar") ? renderCalendar(D.more) : ""],
+  ["calendar", "calendar", ["more"], D => fnOk("renderCalendar") ? renderCalendar(D.more) : "", null, ["moods"]],
+  ["moodseasons", "calendar", ["moods"], D => fnOk("renderMoodSeasons") ? renderMoodSeasons(D.moods) : ""],
   ["eras", "time", ["fun"], D => (typeof renderFunSections === "function" ? renderFunSections(D.fun)[1] : "") || ""],
   ["timetravel", "time", ["time"], D => fnOk("renderTimeTravel") ? renderTimeTravel(D.time) : ""],
+  ["moodtime", "time", ["moods"], D => fnOk("renderMoodTime") ? renderMoodTime(D.moods) : ""],
   ["streaks", "streaks", ["insights"], D => insStreaks(D.insights)],
   ["albums", "albums", ["albums"], D => fnOk("renderAlbums") ? renderAlbums(D.albums) : ""],
   ["genres", "music", ["music"], D => fnOk("renderMusic") ? renderMusic(D.music) : ""],
   ["lovehate", "music", ["more"], D => fnOk("renderLoveHate") ? renderLoveHate(D.more) : ""],
   ["onehit", "music", ["taste"], D => fnOk("renderOneHit") ? renderOneHit(D.taste) : ""],
   ["az", "words", ["taste"], D => fnOk("renderAZ") ? renderAZ(D.taste) : ""],
+  ["lyricwords", "words", ["moods"], D => fnOk("renderLyricWords") ? renderLyricWords(D.moods) : ""],
   ["mood", "words", ["taste"], D => fnOk("renderMood") ? renderMood(D.taste) : ""],
   ["trips", "places", ["more"], D => fnOk("renderTrips") ? renderTrips(D.more) : ""],
   ["places", "places", ["insights"], D => insPlaces(D.insights)],
@@ -526,9 +532,11 @@ function buildInsights() {
 // fill every slot whose data is back
 function fillInsights() {
   const D = ins.data;
-  insSections().forEach(([id, tab, deps, render]) => {
+  insSections().forEach(([id, tab, deps, render, , soft]) => {
     const slot = document.querySelector(`.ins-slot[data-sec="${id}"]`);
-    if (!slot || slot.dataset.done) return;
+    if (!slot) return;
+    const softReady = !soft || soft.every(e => D[e] || ins.err[e]);
+    if (slot.dataset.done && (slot.dataset.soft === "1" || !softReady)) return;   // done, or nothing new to add
     const failed = deps.find(e => ins.err[e]);
     if (failed) {
       slot.innerHTML = `<p class="muted">Couldn't load this part (${esc(ins.err[failed])}).</p>`;
@@ -541,6 +549,7 @@ function fillInsights() {
     slot.innerHTML = html;
     slot.hidden = !html;
     slot.dataset.done = 1;
+    slot.dataset.soft = softReady ? "1" : "0";
     if (id === "compat" && $("insights").open && state.itab === "together")
       slot.querySelectorAll(".compat").forEach((card, i) => setTimeout(() => animateCompat(card), 150 + i * 300));
   });
@@ -847,6 +856,7 @@ async function openDetail(item, fromStack = false) {
 
   if (d.buckets.length > 1) sections.push(`<section class="timeline"><h3>Over time</h3>${timelineSVG(d)}</section>`);
   if (typeof hoursSection === "function") sections.push(hoursSection(d));
+  if (d.mood && typeof moodSection === "function") sections.push(moodSection(d.mood));
 
   if (d.kind === "track") {
     sections.push(`<section><h3>Lyrics</h3><div class="lyrics status" id="dlg-lyrics">Loading lyrics…</div></section>`);

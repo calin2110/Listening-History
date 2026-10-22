@@ -685,3 +685,28 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
   background:currentColor;vertical-align:middle;animation:ins-pulse 1s ease-in-out infinite}
 @keyframes ins-pulse{0%,100%{opacity:.2}50%{opacity:.8}}
 .ins-wait{padding:18px 0;animation:ins-pulse 1.4s ease-in-out infinite}
+
+/* ------------------------------------------------------------------- moods */
+.mood-stack{display:flex;height:12px;border-radius:99px;overflow:hidden;background:var(--line);margin:6px 0}
+.mood-stack.big{height:18px}
+.mood-stack.thin{height:7px;margin:4px 0}
+.mood-stack i{display:block;min-width:2px}
+.mood-head{font-size:1.1rem;margin:4px 0}
+.mood-shares{list-style:none;padding:0;margin:6px 0;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9rem}
+.mood-shares i,.mood-legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+.mood-legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:.8rem;color:var(--muted);margin:2px 0 8px}
+.mood-legend.small{font-size:.75rem}
+.mood-note{font-size:.8rem}
+.mood-tabs{flex-wrap:wrap;margin-bottom:6px}
+.mood-tabs button{font-size:.85rem}
+.mood-rows{display:flex;flex-direction:column;gap:4px}
+.mood-row{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:10px;font-size:.88rem}
+.mood-row .mood-stack{margin:0}
+.mood-callouts{margin:4px 0 10px;padding-left:18px;font-size:.9rem}
+.mood-callouts li{margin:2px 0}
+.mood-line{margin:8px 0 10px}
+.mood-line p{margin:0}
+.mood-time{width:100%;height:150px;display:block}
+.mood-time text{fill:var(--muted);font-size:11px}
+.lyric-words{margin-top:8px}
+@media (max-width:600px){.mood-row{grid-template-columns:110px 1fr}}

@@ -39,7 +39,8 @@ function bucketBlock(kind, p, i) {
         `${s.plays_here} of ${plural(s.plays, "play")} are on ${kind === "weekdays" ? esc(b.name) + "s" : "in " + esc(b.name.toLowerCase())}`))}`
     : b.top.length ? `<p class="muted tt-intro">No standouts; most played:</p>${moreList(b.top, 3, s =>
         ttRow(s, plural(s.plays_here, "play"), ""))}` : `<p class="muted">Nothing played.</p>`;
-  return `<p><b>${pctS(b.share)}</b> of ${esc(yourOf(p.pid))} listening${b.artist ? ` · top artist ${esc(b.artist)}` : ""}</p>${list}`;
+  const mood = kind === "seasons" && typeof moodLine === "function" ? moodLine(p.pid, "seasons", i) : "";
+  return `<p><b>${pctS(b.share)}</b> of ${esc(yourOf(p.pid))} listening${b.artist ? ` · top artist ${esc(b.artist)}` : ""}</p>${mood}${list}`;
 }
 function renderCalendar(m) {
   moreData = m;

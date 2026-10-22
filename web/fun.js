@@ -739,7 +739,8 @@ function clockBody() {
         <div><p class="clock-name">${dp.emoji} ${esc(dp.name)}</p>
           <p class="muted">${esc(partRange(dp))}</p>
           <p><b>${pctSmall(part.share)}</b> of ${esc(your)} listening · ${plural(part.plays, "play")}</p>
-          ${part.artist ? `<p class="muted">Top artist: ${esc(part.artist)}</p>` : ""}</div></div>${list}</div>`;
+          ${part.artist ? `<p class="muted">Top artist: ${esc(part.artist)}</p>` : ""}</div></div>
+      ${typeof moodLine === "function" ? moodLine(p.pid, "parts", clockPart) : ""}${list}</div>`;
   }).join("")}</div>`;
 }
 
