@@ -3600,7 +3600,15 @@ class Handler(BaseHTTPRequestHandler):
                 by_album[album_key] = song
         songs = list(by_album.values())
         songs.sort(key=lambda s: (-s["weight"], search_text(s["sub"]), search_text(s["title"])))
-        self.send_json({"people": people, "songs": songs[:500]})
+        # Keep strong choices from every available year instead of letting recent, heavily
+        # played years fill the response before the game gets a chance to distribute them.
+        per_year, balanced = Counter(), []
+        for song in songs:
+            if per_year[song["year"]] >= 12:
+                continue
+            per_year[song["year"]] += 1
+            balanced.append(song)
+        self.send_json({"people": people, "songs": balanced})
 
     def api_preview(self, qs):
         tid = self._track_key(qs)

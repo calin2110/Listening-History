@@ -8,6 +8,8 @@ Every future feature or behavior change must add a brief one-line entry here.
 - Hitster preview playback — Fetches and decodes clips through the same Web Audio path as Name That Tune.
 - Hitster card goal — Plays to 10 kept cards by default and lets players choose any goal from 2 to 25.
 - Hitster album de-duplication — Limits each game pool to one song per artist and album.
+- Hitster year distribution — Uses each release year once and samples years before selecting their songs.
+- Hitster difficulty — Adds Easy, Medium, Hard, and Expert presets for year spacing, song obscurity, snippet length, and replays.
 - Original release years — Corrects known misleading library tags and lets fresh catalog metadata replace stale values.
 
 ## 2026-10-21

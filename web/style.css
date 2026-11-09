@@ -635,7 +635,8 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .hitster-dlg .dlg-head h2,.hitster-dlg .dlg-head p{margin:0}
 .hitster-dlg .dlg-head p{color:var(--muted);font-size:.9rem}
 .hs-goal{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.82rem;font-weight:600}
-.hs-goal input{width:58px;padding:7px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit}
+.hs-goal input,.hs-goal select{padding:7px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit}
+.hs-goal input{width:58px}
 .hitster-body{padding:20px 24px 26px;text-align:center}
 .hitster-body h3{margin:12px 0}
 .hs-note{color:var(--muted);font-size:.85rem;margin:0 auto 14px;max-width:62ch}

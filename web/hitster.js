@@ -1,11 +1,27 @@
 "use strict";
 // Hitster: hear a hidden shared song, then place it on a release-year timeline.
 
+const HS_DIFFICULTIES = Object.freeze({
+  easy: {seconds: 20, plays: Infinity, hint: "widely spaced years, popular songs, unlimited replays"},
+  medium: {seconds: 15, plays: 3, hint: "balanced years, normal song weighting, three plays"},
+  hard: {seconds: 10, plays: 2, hint: "nearby years, less-played songs, two plays"},
+  expert: {seconds: 6, plays: 1, hint: "tightly clustered years, obscure songs, no replay"},
+});
+
 const hs = {
-  mode: "solo", target: 10, pool: [], people: [], players: [], timelines: [], scores: [],
+  mode: "solo", difficulty: "medium", target: 10, pool: [], people: [], players: [], timelines: [], scores: [],
   turn: 0, current: null, revealed: false, correct: false, picked: null, winner: null,
-  ctx: null, buf: null, src: null, load: null, timer: null, gen: 0,
+  playsUsed: 0, ctx: null, buf: null, src: null, load: null, timer: null, gen: 0,
 };
+
+function hsDifficulty() { return HS_DIFFICULTIES[hs.difficulty]; }
+function hsCanPlay() { return hs.playsUsed < hsDifficulty().plays; }
+function hsPlayLabel() {
+  const level = hsDifficulty(), remaining = level.plays - hs.playsUsed;
+  if (remaining <= 0) return "Snippet used";
+  const replay = Number.isFinite(remaining) ? ` · ${remaining} play${remaining === 1 ? "" : "s"} left` : "";
+  return `▶ Play ${level.seconds}-second snippet${replay}`;
+}
 
 function hsStop() {
   clearTimeout(hs.timer);
@@ -14,19 +30,62 @@ function hsStop() {
   hs.src = null;
   try { source?.stop(); } catch { /* already stopped */ }
   const button = $("hitster-body")?.querySelector("[data-hs='play']");
-  if (button) button.textContent = "▶ Play 20-second snippet";
+  if (button) { button.textContent = hsPlayLabel(); button.disabled = !hsCanPlay(); }
   const bar = $("hitster-body")?.querySelector(".hs-progress i");
   if (bar) { bar.style.transition = "none"; bar.style.width = "0"; }
 }
 
-function hsWeightedPick() {
-  const total = hs.pool.reduce((n, s) => n + Math.max(s.weight || 0, 0.01), 0);
+function hsWeightedTake(items, weightFor) {
+  const weights = items.map(item => {
+    const weight = weightFor(item);
+    return Number.isFinite(weight) && weight > 0 ? weight : Number.EPSILON;
+  });
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
   let at = Math.random() * total;
-  for (let i = 0; i < hs.pool.length; i++) {
-    at -= Math.max(hs.pool[i].weight || 0, 0.01);
-    if (at <= 0) return hs.pool.splice(i, 1)[0];
+  for (let i = 0; i < items.length; i++) {
+    at -= weights[i];
+    if (at <= 0) return items.splice(i, 1)[0];
   }
-  return hs.pool.pop();
+  return items.pop();
+}
+
+function hsBuildPool(songs) {
+  const grouped = new Map();
+  for (const song of songs) {
+    if (!grouped.has(song.year)) grouped.set(song.year, []);
+    grouped.get(song.year).push(song);
+  }
+  const years = [...grouped].map(([year, choices]) => {
+    const strongest = choices.map(s => Math.max(s.weight || 0, 0.01)).sort((a, b) => b - a).slice(0, 3);
+    return {year, choices, quality: strongest.reduce((sum, weight) => sum + weight, 0) / strongest.length};
+  });
+  const chosenYears = [], pool = [];
+  while (years.length) {
+    const bucket = hsWeightedTake(years, candidate => {
+      const quality = Math.log1p(candidate.quality);
+      if (!chosenYears.length) {
+        return quality ** ({easy: 1.5, medium: 1, hard: 0.6, expert: 0.35}[hs.difficulty]);
+      }
+      const gap = Math.min(...chosenYears.map(year => Math.abs(year - candidate.year)));
+      if (hs.difficulty === "easy") return quality ** 1.5 * (1 + Math.min(gap, 24) / 3);
+      if (hs.difficulty === "medium") return quality * (1 + Math.min(gap, 16) / 8);
+      if (hs.difficulty === "hard") return quality ** 0.6 / (1 + gap / 6);
+      return quality ** 0.35 / ((1 + gap / 3) ** 2);
+    });
+    pool.push(hsWeightedTake(bucket.choices, song => {
+      const popularity = Math.max(song.weight || 0, 0.01);
+      if (hs.difficulty === "easy") return popularity ** 1.5;
+      if (hs.difficulty === "medium") return popularity;
+      if (hs.difficulty === "hard") return 1 / Math.sqrt(popularity);
+      return 1 / popularity;
+    }));
+    chosenYears.push(bucket.year);
+  }
+  return pool;
+}
+
+function hsWeightedPick() {
+  return hs.pool.shift();
 }
 
 function hsCard(s) {
@@ -69,12 +128,13 @@ function hsRender() {
     <div class="g-actions"><button type="button" data-hs="${hs.winner == null ? "next" : "finish"}">
       ${hs.winner == null ? (hs.mode === "duo" ? "Next player" : "Next song") : "See the result"}</button></div>` : "";
   $("hitster-body").innerHTML = `${hsScores()}
-    <p class="hs-note">Drawn from songs shared by <b>${esc(shared)}</b>; songs popular with everyone are more likely.
-      Only one song per album can appear. The starting card anchors the timeline and does not count toward the
-      ${hs.target} you need to keep.</p>
+    <p class="hs-note">Drawn from songs shared by <b>${esc(shared)}</b>.
+      Every song has a different release year, and only one song per album can appear. The starting card anchors the timeline and does not count toward the
+      ${hs.target} you need to keep. <b>${esc(hs.difficulty[0].toUpperCase() + hs.difficulty.slice(1))}:</b>
+      ${esc(hsDifficulty().hint)}.</p>
     <h3>${hs.mode === "duo" ? esc(name) + "’s turn" : "Place the mystery song"}</h3>
     <div class="hs-mystery${hs.revealed ? " heard" : ""}"><span aria-hidden="true">?</span>
-      <button type="button" data-hs="play">▶ Play 20-second snippet</button><div class="hs-progress"><i></i></div>
+      <button type="button" data-hs="play"${hsCanPlay() ? "" : " disabled"}>${hsPlayLabel()}</button><div class="hs-progress"><i></i></div>
       <small>No title, artist, cover, or year until you place it.</small></div>
     ${hs.revealed ? reveal : `<p class="g-q">Where was it released?</p>${hsTimeline(timeline, true)}`}`;
 }
@@ -102,6 +162,7 @@ async function hsLoadPreview() {
 
 async function hsPlay() {
   if (hs.src) return hsStop();
+  if (!hsCanPlay()) return;
   hsStop();
   const button = $("hitster-body").querySelector("[data-hs='play']");
   const bar = $("hitster-body").querySelector(".hs-progress i");
@@ -112,7 +173,7 @@ async function hsPlay() {
     const buffer = await hsLoadPreview();
     if (!buffer || !button.isConnected) return;
     const source = hs.ctx.createBufferSource(), gain = hs.ctx.createGain(), now = hs.ctx.currentTime;
-    const len = Math.min(20, buffer.duration), fade = Math.min(0.02, len / 4);
+    const len = Math.min(hsDifficulty().seconds, buffer.duration), fade = Math.min(0.02, len / 4);
     source.buffer = buffer;
     source.connect(gain).connect(hs.ctx.destination);
     gain.gain.setValueAtTime(0, now);
@@ -121,6 +182,7 @@ async function hsPlay() {
     gain.gain.linearRampToValueAtTime(0, now + len);
     source.onended = () => { if (hs.src === source) hsStop(); };
     source.start(now, 0, len);
+    hs.playsUsed++;
     hs.src = source;
     button.textContent = "■ Stop snippet";
     bar.style.transition = "none"; bar.style.width = "0";
@@ -131,7 +193,7 @@ async function hsPlay() {
     hsStop();
     toast(`Couldn't play this preview: ${e.message}.`);
   } finally {
-    if (button.isConnected) button.disabled = false;
+    if (button.isConnected) button.disabled = !hs.src && !hsCanPlay();
   }
 }
 
@@ -161,7 +223,7 @@ function hsNext() {
       <div class="g-actions"><button type="button" data-hs="restart">Start again</button></div>`;
     return;
   }
-  Object.assign(hs, {revealed: false, correct: false, picked: null, buf: null, load: null});
+  Object.assign(hs, {revealed: false, correct: false, picked: null, playsUsed: 0, buf: null, load: null});
   hsRender();
   hsLoadPreview().catch(() => {});                       // same preloading path as Name That Tune
 }
@@ -190,8 +252,9 @@ async function startHitster() {
     if (!response.ok) throw new Error(data.error || "HTTP " + response.status);
     if (gen !== hs.gen) return;
     const needed = hs.target * (hs.mode === "duo" ? 2 : 1) + 1;
-    if (data.songs.length < needed) throw new Error(`not enough distinct shared albums with a release year and preview (need ${needed})`);
-    hs.pool = data.songs.slice();
+    const yearCount = new Set(data.songs.map(song => song.year)).size;
+    if (yearCount < needed) throw new Error(`not enough distinct release years with shared songs and previews (need ${needed})`);
+    hs.pool = hsBuildPool(data.songs);
     hs.players = hs.mode === "duo" ? hs.people.slice(0, 2).map(pname) : ["You"];
     hs.scores = hs.players.map(() => 0);
     hs.turn = 0; hs.winner = null;
@@ -219,6 +282,11 @@ $("hitster-dlg").addEventListener("close", () => { hs.gen++; hsStop(); });
 $("hitster-target").addEventListener("change", e => {
   hs.target = Math.max(2, Math.min(25, Math.round(Number(e.target.value) || 10)));
   e.target.value = hs.target;
+  if ($("hitster-dlg").open) startHitster();
+});
+$("hitster-difficulty").addEventListener("change", e => {
+  if (!HS_DIFFICULTIES[e.target.value]) return;
+  hs.difficulty = e.target.value;
   if ($("hitster-dlg").open) startHitster();
 });
 $("hitster-modes").addEventListener("click", e => {
