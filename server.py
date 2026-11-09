@@ -56,6 +56,7 @@ API (all GET, JSON unless noted). Common parameters:
   /api/music      genres, decades, nostalgia, song lengths (from music info looked up so far)
   /api/preview    ?k=<track key>: {"url": 30-second preview} from the iTunes Search API;
                   audio=1 returns the clip itself
+  /api/hitster    shared songs with release years and previews, weighted by shared popularity
   /api/lyrics     ?k=<track key>: {"text": "..."} or {"text": null} (cached)
   /api/extras     part=taste|sync|unusual (default: all). per person: A–Z of artists, title words (dark vs light), one-hit wonders;
                   per pair: telepathy (same song within an hour, out of nowhere), most in-sync day
@@ -2342,6 +2343,12 @@ def _meta_from_itunes(r):
             "track_count": r.get("trackCount") or None, "track_no": r.get("trackNumber") or None}
 
 
+# Original single years where a library tag or later album release is misleading.
+RELEASE_YEAR_CORRECTIONS = {
+    "bring me the horizon\tdarkside": 2023,
+}
+
+
 class MetaStore:
     PAUSE = 3.2                                        # seconds between requests, ~19 a minute
 
@@ -2359,7 +2366,11 @@ class MetaStore:
                 self.cache.set(key, {**old, **{k: v for k, v in m.items() if v and not old.get(k)}})
 
     def get(self, tid):
-        return self.cache.get(self.lib.keys[tid])[1]
+        key = self.lib.keys[tid]
+        m = self.cache.get(key)[1]
+        if m and key in RELEASE_YEAR_CORRECTIONS:
+            return dict(m, year=RELEASE_YEAR_CORRECTIONS[key])
+        return m
 
     def start(self):
         ms = Counter()
@@ -2417,7 +2428,7 @@ class MetaStore:
             r = found.get(self.lib.apple_ids[tid])
             old = self.cache.get(key)[1] or {}
             new = _meta_from_itunes(r) if r else {}
-            self.cache.set(key, {**{k: v for k, v in new.items() if v}, **{k: v for k, v in old.items() if v},
+            self.cache.set(key, {**{k: v for k, v in old.items() if v}, **{k: v for k, v in new.items() if v},
                                  "preview": new.get("preview") or old.get("preview"), "tried": True,
                                  "source": old.get("source", "itunes")} if (r or old) else None)
 
@@ -2451,7 +2462,8 @@ class MetaStore:
         old = self.cache.get(key)[1] or {}
         if best:
             new = _meta_from_itunes(best)
-            m = {**new, **{k: v for k, v in old.items() if v and k != "tried"}, "preview": new["preview"] or old.get("preview"),
+            m = {**{k: v for k, v in old.items() if v and k != "tried"}, **{k: v for k, v in new.items() if v},
+                 "preview": new["preview"] or old.get("preview"),
                  "tried": True, "source": old.get("source", "itunes")}
         else:
             m = dict(old, tried=True) if old else None
@@ -3441,7 +3453,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             route = {
                 "/api/meta": self.api_meta, "/api/tracks": self.api_tracks,
-                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/albums": self.api_albums, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview,
+                "/api/detail": self.api_detail, "/api/insights": self.api_insights, "/api/fun": self.api_fun, "/api/time": self.api_time, "/api/clock": self.api_clock, "/api/more": self.api_more, "/api/albums": self.api_albums, "/api/hidden": self.api_hidden, "/api/artists": self.api_artists, "/api/music": self.api_music, "/api/preview": self.api_preview, "/api/hitster": self.api_hitster,
                 "/api/concerts": self.api_concerts, "/api/concert": self.api_concert, "/api/versus": self.api_versus,
                 "/api/extras": self.api_extras, "/api/roulette": self.api_roulette, "/api/moods": self.api_moods,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
@@ -3551,6 +3563,44 @@ class Handler(BaseHTTPRequestHandler):
         c = self.common(qs)
         self.send_json(self.lib.music(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True), tuple(c["people"]),
                                       int(c["minplay_s"] * 1000), self.meta))
+
+    def api_hitster(self, qs):
+        """Songs everybody selected has played, with cached release years and previews.
+        Weight favors songs that are popular with every person, not only one heavy listener."""
+        c = self.common(qs)
+        people = c["people"]
+        if len(people) < 2:
+            raise BadParam("Hitster needs at least two selected listening histories")
+        recs = self.lib.aggregate(day_to_ts(c["frm"]), day_to_ts(c["to"], end=True),
+                                  0.0, 0.0, int(c["minplay_s"] * 1000))
+        by_album = {}
+        max_year = datetime.now().year + 1
+        for tid, per in recs.items():
+            plays = [per[pid][PLAYS] if per[pid] else 0 for pid in people]
+            if not all(plays):
+                continue
+            m = self.meta.get(tid) or {}
+            try:
+                year = int(m.get("year") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (1900 <= year <= max_year) or not m.get("preview"):
+                continue
+            artist, title = self.lib.display[tid]
+            # The least-listening person sets the base; total popularity breaks close ties.
+            weight = min(plays) * math.log1p(sum(plays))
+            song = {"key": self.lib.keys[tid], "cover_key": self.lib.keys[tid],
+                    "title": title, "sub": artist, "year": year,
+                    "weight": round(weight, 3), "plays": plays}
+            album = self.lib.album_name[tid]
+            album_key = ((norm_artist(artist, True), norm_album(album, True)) if album
+                         else ("track", self.lib.keys[tid]))
+            previous = by_album.get(album_key)
+            if previous is None or song["weight"] > previous["weight"]:
+                by_album[album_key] = song
+        songs = list(by_album.values())
+        songs.sort(key=lambda s: (-s["weight"], search_text(s["sub"]), search_text(s["title"])))
+        self.send_json({"people": people, "songs": songs[:500]})
 
     def api_preview(self, qs):
         tid = self._track_key(qs)

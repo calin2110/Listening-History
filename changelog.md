@@ -2,6 +2,14 @@
 
 Every future feature or behavior change must add a brief one-line entry here.
 
+## 2026-11-09
+
+- Hitster — Adds solo and two-player release-timeline games using 20-second previews weighted toward songs popular with every listener.
+- Hitster preview playback — Fetches and decodes clips through the same Web Audio path as Name That Tune.
+- Hitster card goal — Plays to 10 kept cards by default and lets players choose any goal from 2 to 25.
+- Hitster album de-duplication — Limits each game pool to one song per artist and album.
+- Original release years — Corrects known misleading library tags and lets fresh catalog metadata replace stale values.
+
 ## 2026-10-21
 
 - Song, album, and artist streak records — Shows one listening-time winner for consecutive plays, a day, a week, or a month.

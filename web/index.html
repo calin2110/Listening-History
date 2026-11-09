@@ -1,210 +1,260 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>What I listened to</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What I listened to</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
-<div class="wrap">
-  <header>
-    <h1 id="headline">What I listened to</h1>
+  <div class="wrap">
+    <header>
+      <h1 id="headline">What I listened to</h1>
 
-    <div class="people" id="people" role="group" aria-label="Whose listening to include" hidden></div>
+      <div class="people" id="people" role="group" aria-label="Whose listening to include" hidden></div>
 
-    <div class="frames" id="frames" role="group" aria-label="Time frame">
-      <button type="button" data-frame="1m">Last month</button>
-      <button type="button" data-frame="3m">3 months</button>
-      <button type="button" data-frame="6m">6 months</button>
-      <button type="button" data-frame="1y">Last year</button>
-      <button type="button" data-frame="2y">2 years</button>
-      <button type="button" data-frame="5y">5 years</button>
-      <button type="button" data-frame="all">All time</button>
-      <select id="year" aria-label="Pick a calendar year"><option value="">Year…</option></select>
-      <span class="custom">
-        <input type="date" id="from" aria-label="From date">
-        <span aria-hidden="true">to</span>
-        <input type="date" id="to" aria-label="To date">
-      </span>
-    </div>
-    <p class="frame-note" id="frame-note" hidden></p>
-
-    <div class="decay">
-      <label for="decay">Decay</label>
-      <input type="range" id="decay" min="0" max="8" step="1" value="0" aria-describedby="decay-note">
-      <output id="decay-val" for="decay">Off</output>
-      <label class="check"><input type="checkbox" id="minplay" checked> Ignore plays under 30 seconds</label>
-      <button type="button" class="ghost small hide-btn" id="hide-open">🙈 Hide or 🎯 focus artists</button>
-      <span class="note" id="decay-note"></span>
-    </div>
-
-    <section class="joint" id="joint" aria-label="Joint ranking" hidden>
-      <div class="joint-row">
-        <label>Formula
-          <select id="formula">
-            <option value="entropy">Shared listening (entropy)</option>
-            <option value="logsum">Sum of logs (lenient)</option>
-            <option value="harmonic">Harmonic mean (strict)</option>
-          </select>
-        </label>
-        <label>Compare by
-          <select id="by">
-            <option value="plays">Plays</option>
-            <option value="minutes">Minutes</option>
-            <option value="score">Points (decayed minutes)</option>
-          </select>
-        </label>
-        <label class="check"><input type="checkbox" id="common" checked> Only songs everyone played</label>
-        <label class="check"><input type="checkbox" id="norm"> Adjust for how much each person listens</label>
+      <div class="frames" id="frames" role="group" aria-label="Time frame">
+        <button type="button" data-frame="1m">Last month</button>
+        <button type="button" data-frame="3m">3 months</button>
+        <button type="button" data-frame="6m">6 months</button>
+        <button type="button" data-frame="1y">Last year</button>
+        <button type="button" data-frame="2y">2 years</button>
+        <button type="button" data-frame="5y">5 years</button>
+        <button type="button" data-frame="all">All time</button>
+        <select id="year" aria-label="Pick a calendar year">
+          <option value="">Year…</option>
+        </select>
+        <span class="custom">
+          <input type="date" id="from" aria-label="From date">
+          <span aria-hidden="true">to</span>
+          <input type="date" id="to" aria-label="To date">
+        </span>
       </div>
-      <div class="weights" id="weights"></div>
-      <p class="formula" id="formula-text"></p>
-      <p class="match" id="match" hidden></p>
-    </section>
+      <p class="frame-note" id="frame-note" hidden></p>
 
-    <div class="totals" id="totals" aria-live="polite"></div>
-    <div class="split big" id="bigsplit"></div>
-    <p class="hidden-note" id="hidden-note" hidden></p>
-    <div class="funbar">
-      <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
-      <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
-      <button type="button" class="fun-btn ghostish" id="vs-open" hidden>⚔️ Versus</button>
-      <button type="button" class="fun-btn ghostish" id="rl-open">🎰 Rediscover roulette</button>
-      <button type="button" class="fun-btn ghostish" id="cx-open">🎤 Prepare for a concert</button>
+      <div class="decay">
+        <label for="decay">Decay</label>
+        <input type="range" id="decay" min="0" max="8" step="1" value="0" aria-describedby="decay-note">
+        <output id="decay-val" for="decay">Off</output>
+        <label class="check"><input type="checkbox" id="minplay" checked> Ignore plays under 30 seconds</label>
+        <button type="button" class="ghost small hide-btn" id="hide-open">🙈 Hide or 🎯 focus artists</button>
+        <span class="note" id="decay-note"></span>
+      </div>
+
+      <section class="joint" id="joint" aria-label="Joint ranking" hidden>
+        <div class="joint-row">
+          <label>Formula
+            <select id="formula">
+              <option value="entropy">Shared listening (entropy)</option>
+              <option value="logsum">Sum of logs (lenient)</option>
+              <option value="harmonic">Harmonic mean (strict)</option>
+            </select>
+          </label>
+          <label>Compare by
+            <select id="by">
+              <option value="plays">Plays</option>
+              <option value="minutes">Minutes</option>
+              <option value="score">Points (decayed minutes)</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" id="common" checked> Only songs everyone played</label>
+          <label class="check"><input type="checkbox" id="norm"> Adjust for how much each person listens</label>
+        </div>
+        <div class="weights" id="weights"></div>
+        <p class="formula" id="formula-text"></p>
+        <p class="match" id="match" hidden></p>
+      </section>
+
+      <div class="totals" id="totals" aria-live="polite"></div>
+      <div class="split big" id="bigsplit"></div>
+      <p class="hidden-note" id="hidden-note" hidden></p>
+      <div class="funbar">
+        <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
+        <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
+        <button type="button" class="fun-btn ghostish" id="hitster-open" hidden>🎵 Hitster</button>
+        <button type="button" class="fun-btn ghostish" id="vs-open" hidden>⚔️ Versus</button>
+        <button type="button" class="fun-btn ghostish" id="rl-open">🎰 Rediscover roulette</button>
+        <button type="button" class="fun-btn ghostish" id="cx-open">🎤 Prepare for a concert</button>
+      </div>
+    </header>
+
+    <details class="insights" id="insights">
+      <summary>Insights <span>streaks, taste match, when and where you listen</span></summary>
+      <div id="insights-body" class="insights-body">
+        <p class="muted">Loading…</p>
+      </div>
+    </details>
+
+    <div class="viewbar">
+      <div class="tabs" id="level" role="tablist" aria-label="Group by">
+        <button type="button" role="tab" data-level="track">Songs</button>
+        <button type="button" role="tab" data-level="artist">Artists</button>
+        <button type="button" role="tab" data-level="album">Albums</button>
+      </div>
+      <label>Show
+        <select id="view" aria-label="What to show"></select>
+      </label>
+      <label id="gap-wrap" hidden>not played for
+        <select id="gap">
+          <option value="91">3 months</option>
+          <option value="182">6 months</option>
+          <option value="365" selected>a year</option>
+          <option value="730">2 years</option>
+        </select>
+      </label>
+      <label id="cap-wrap"
+        title="Show only the best song of each album or artist, so one album doesn't fill the list">One song per
+        <select id="cap">
+          <option value="">no limit</option>
+          <option value="album">album</option>
+          <option value="artist">artist</option>
+        </select>
+      </label>
+      <button type="button" class="ghost" id="copy">Copy top 50 as playlist</button>
     </div>
-  </header>
 
-  <details class="insights" id="insights">
-    <summary>Insights <span>streaks, taste match, when and where you listen</span></summary>
-    <div id="insights-body" class="insights-body"><p class="muted">Loading…</p></div>
-  </details>
-
-  <div class="viewbar">
-    <div class="tabs" id="level" role="tablist" aria-label="Group by">
-      <button type="button" role="tab" data-level="track">Songs</button>
-      <button type="button" role="tab" data-level="artist">Artists</button>
-      <button type="button" role="tab" data-level="album">Albums</button>
+    <div class="controls">
+      <input id="q" type="search" placeholder="Search" aria-label="Search">
+      <select id="sort" aria-label="Sort by"></select>
+      <select id="min" aria-label="Minimum listening time">
+        <option value="0">Any length</option>
+        <option value="5">At least 5 min</option>
+        <option value="20" selected>At least 20 min</option>
+        <option value="60">At least 1 hour</option>
+      </select>
+      <select id="size" aria-label="Items per page">
+        <option>24</option>
+        <option selected>48</option>
+        <option>96</option>
+        <option>192</option>
+      </select>
+      <span class="count" id="count"></span>
     </div>
-    <label>Show
-      <select id="view" aria-label="What to show"></select>
-    </label>
-    <label id="gap-wrap" hidden>not played for
-      <select id="gap">
-        <option value="91">3 months</option>
-        <option value="182">6 months</option>
-        <option value="365" selected>a year</option>
-        <option value="730">2 years</option>
-      </select>
-    </label>
-    <label id="cap-wrap" title="Show only the best song of each album or artist, so one album doesn't fill the list">One song per
-      <select id="cap">
-        <option value="">no limit</option>
-        <option value="album">album</option>
-        <option value="artist">artist</option>
-      </select>
-    </label>
-    <button type="button" class="ghost" id="copy">Copy top 50 as playlist</button>
+
+    <ol class="grid" id="grid"></ol>
+    <nav class="pager" id="pager" aria-label="Pages"></nav>
   </div>
 
-  <div class="controls">
-    <input id="q" type="search" placeholder="Search" aria-label="Search">
-    <select id="sort" aria-label="Sort by"></select>
-    <select id="min" aria-label="Minimum listening time">
-      <option value="0">Any length</option>
-      <option value="5">At least 5 min</option>
-      <option value="20" selected>At least 20 min</option>
-      <option value="60">At least 1 hour</option>
-    </select>
-    <select id="size" aria-label="Items per page">
-      <option>24</option><option selected>48</option><option>96</option><option>192</option>
-    </select>
-    <span class="count" id="count"></span>
-  </div>
+  <dialog id="dlg" aria-labelledby="dlg-title">
+    <div class="dlg-head">
+      <img id="dlg-img" alt="">
+      <div>
+        <h2 id="dlg-title"></h2>
+        <p id="dlg-sub"></p>
+      </div>
+      <button type="button" class="close" id="dlg-close" aria-label="Close">×</button>
+    </div>
+    <div class="dlg-body" id="dlg-body"></div>
+  </dialog>
 
-  <ol class="grid" id="grid"></ol>
-  <nav class="pager" id="pager" aria-label="Pages"></nav>
-</div>
+  <dialog id="recap" class="recap" aria-label="Your recap">
+    <div class="recap-bars" id="recap-bars"></div>
+    <button type="button" class="recap-x" id="recap-close" aria-label="Close recap">×</button>
+    <button type="button" class="recap-save" id="recap-save">Save image</button>
+    <div class="recap-stage" id="recap-stage" aria-live="polite"></div>
+  </dialog>
 
-<dialog id="dlg" aria-labelledby="dlg-title">
-  <div class="dlg-head">
-    <img id="dlg-img" alt="">
-    <div><h2 id="dlg-title"></h2><p id="dlg-sub"></p></div>
-    <button type="button" class="close" id="dlg-close" aria-label="Close">×</button>
-  </div>
-  <div class="dlg-body" id="dlg-body"></div>
-</dialog>
+  <dialog id="game" class="game" aria-labelledby="game-title">
+    <div class="dlg-head">
+      <h2 id="game-title">Games</h2>
+      <div class="tabs" id="game-modes" role="tablist" aria-label="Game"></div>
+      <button type="button" class="close" id="game-close" aria-label="Close">×</button>
+    </div>
+    <div class="game-stage" id="game-stage"></div>
+  </dialog>
 
-<dialog id="recap" class="recap" aria-label="Your recap">
-  <div class="recap-bars" id="recap-bars"></div>
-  <button type="button" class="recap-x" id="recap-close" aria-label="Close recap">×</button>
-  <button type="button" class="recap-save" id="recap-save">Save image</button>
-  <div class="recap-stage" id="recap-stage" aria-live="polite"></div>
-</dialog>
+  <dialog id="hitster-dlg" class="hitster-dlg" aria-labelledby="hitster-title">
+    <div class="dlg-head">
+      <div>
+        <h2 id="hitster-title">🎵 Hitster</h2>
+        <p>Hear the song, then place it on the release timeline.</p>
+      </div>
+      <div class="tabs" id="hitster-modes" role="tablist" aria-label="Hitster mode">
+        <button type="button" role="tab" data-hs-mode="solo" aria-selected="true">Solo</button>
+        <button type="button" role="tab" data-hs-mode="duo" aria-selected="false">2 players</button>
+      </div>
+      <label class="hs-goal">Cards to win
+        <input type="number" id="hitster-target" min="2" max="25" step="1" value="10">
+      </label>
+      <button type="button" class="close" id="hitster-close" aria-label="Close">×</button>
+    </div>
+    <div id="hitster-body" class="hitster-body"></div>
+  </dialog>
 
-<dialog id="game" class="game" aria-labelledby="game-title">
-  <div class="dlg-head">
-    <h2 id="game-title">Games</h2>
-    <div class="tabs" id="game-modes" role="tablist" aria-label="Game"></div>
-    <button type="button" class="close" id="game-close" aria-label="Close">×</button>
-  </div>
-  <div class="game-stage" id="game-stage"></div>
-</dialog>
+  <dialog id="hide-dlg" class="hide-dlg" aria-labelledby="hide-title">
+    <div class="dlg-head">
+      <div>
+        <h2 id="hide-title">Hide or focus on artists</h2>
+        <p>🙈 Hide leaves an artist out of everything: tops, insights, recaps and games. 🎯 Only shows nothing but that
+          artist (add more to focus on several). Songs they’re featured on count too.</p>
+      </div>
+      <button type="button" class="close" id="hide-close" aria-label="Close">×</button>
+    </div>
+    <div class="hide-body">
+      <input type="search" id="hide-q" placeholder="Search for an artist…" aria-label="Search for an artist"
+        autocomplete="off">
+      <ul class="hide-results" id="hide-results"></ul>
+      <h3>🎯 Focusing on</h3>
+      <ul class="hide-list" id="only-list"></ul>
+      <h3>🙈 Hidden now</h3>
+      <ul class="hide-list" id="hide-list"></ul>
+    </div>
+  </dialog>
 
-<dialog id="hide-dlg" class="hide-dlg" aria-labelledby="hide-title">
-  <div class="dlg-head">
-    <div><h2 id="hide-title">Hide or focus on artists</h2>
-      <p>🙈 Hide leaves an artist out of everything: tops, insights, recaps and games. 🎯 Only shows nothing but that
-        artist (add more to focus on several). Songs they’re featured on count too.</p></div>
-    <button type="button" class="close" id="hide-close" aria-label="Close">×</button>
-  </div>
-  <div class="hide-body">
-    <input type="search" id="hide-q" placeholder="Search for an artist…" aria-label="Search for an artist" autocomplete="off">
-    <ul class="hide-results" id="hide-results"></ul>
-    <h3>🎯 Focusing on</h3>
-    <ul class="hide-list" id="only-list"></ul>
-    <h3>🙈 Hidden now</h3>
-    <ul class="hide-list" id="hide-list"></ul>
-  </div>
-</dialog>
+  <dialog id="cx-dlg" class="cx-dlg" aria-labelledby="cx-title">
+    <div class="dlg-head">
+      <div>
+        <h2 id="cx-title">🎤 Prepare for your concerts</h2>
+        <p>Add the shows you’re going to and get the songs to brush up on: their hits, songs you barely know
+          and favourites you haven’t played in a while. No setlists, so no spoilers.</p>
+      </div>
+      <button type="button" class="close" id="cx-close" aria-label="Close">×</button>
+    </div>
+    <div id="cx-body" class="cx-body"></div>
+  </dialog>
 
-<dialog id="cx-dlg" class="cx-dlg" aria-labelledby="cx-title">
-  <div class="dlg-head">
-    <div><h2 id="cx-title">🎤 Prepare for your concerts</h2>
-      <p>Add the shows you’re going to and get the songs to brush up on: their hits, songs you barely know
-        and favourites you haven’t played in a while. No setlists, so no spoilers.</p></div>
-    <button type="button" class="close" id="cx-close" aria-label="Close">×</button>
-  </div>
-  <div id="cx-body" class="cx-body"></div>
-</dialog>
+  <dialog id="vs-dlg" class="vs-dlg" aria-labelledby="vs-title">
+    <div class="dlg-head">
+      <div>
+        <h2 id="vs-title">⚔️ Versus</h2>
+        <p>Two people, one artist: who’s the bigger fan?</p>
+      </div>
+      <button type="button" class="close" id="vs-close" aria-label="Close">×</button>
+    </div>
+    <div class="vs-wrap">
+      <div id="vs-controls"></div>
+      <div id="vs-body"></div>
+    </div>
+  </dialog>
 
-<dialog id="vs-dlg" class="vs-dlg" aria-labelledby="vs-title">
-  <div class="dlg-head">
-    <div><h2 id="vs-title">⚔️ Versus</h2><p>Two people, one artist: who’s the bigger fan?</p></div>
-    <button type="button" class="close" id="vs-close" aria-label="Close">×</button>
-  </div>
-  <div class="vs-wrap"><div id="vs-controls"></div><div id="vs-body"></div></div>
-</dialog>
+  <dialog id="rl-dlg" class="rl-dlg" aria-labelledby="rl-title">
+    <div class="dlg-head">
+      <div>
+        <h2 id="rl-title">🎰 Rediscover roulette</h2>
+        <p>A song you loved and then forgot: 8+ plays, nothing for over a year.</p>
+      </div>
+      <button type="button" class="close" id="rl-close" aria-label="Close">×</button>
+    </div>
+    <div class="game-stage" id="rl-body"></div>
+  </dialog>
 
-<dialog id="rl-dlg" class="rl-dlg" aria-labelledby="rl-title">
-  <div class="dlg-head">
-    <div><h2 id="rl-title">🎰 Rediscover roulette</h2><p>A song you loved and then forgot: 8+ plays, nothing for over a year.</p></div>
-    <button type="button" class="close" id="rl-close" aria-label="Close">×</button>
-  </div>
-  <div class="game-stage" id="rl-body"></div>
-</dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
-
-<script src="app.js"></script>
-<script src="fun.js"></script>
-<script src="more.js"></script>
-<script src="concerts.js"></script>
-<script src="versus.js"></script>
-<script src="extras.js"></script>
-<script src="moods.js"></script>
+  <script src="app.js"></script>
+  <script src="fun.js"></script>
+  <script src="more.js"></script>
+  <script src="concerts.js"></script>
+  <script src="versus.js"></script>
+  <script src="extras.js"></script>
+  <script src="moods.js"></script>
+  <script src="hitster.js"></script>
 </body>
+
 </html>

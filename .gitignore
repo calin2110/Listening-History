@@ -230,3 +230,7 @@ dominik/
 # Caches
 *.json
 *.csv
+
+# Irrelevant
+*.mpeg
+*.mp3
