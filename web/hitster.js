@@ -173,7 +173,9 @@ async function hsPlay() {
     const buffer = await hsLoadPreview();
     if (!buffer || !button.isConnected) return;
     const source = hs.ctx.createBufferSource(), gain = hs.ctx.createGain(), now = hs.ctx.currentTime;
-    const len = Math.min(hsDifficulty().seconds, buffer.duration), fade = Math.min(0.02, len / 4);
+    const want = hsDifficulty().seconds;
+    const from = audibleStart(buffer, Math.min(want, 2), want);        // skip silent intros (more.js)
+    const len = Math.min(want, buffer.duration - from), fade = Math.min(0.02, len / 4);
     source.buffer = buffer;
     source.connect(gain).connect(hs.ctx.destination);
     gain.gain.setValueAtTime(0, now);
@@ -181,7 +183,7 @@ async function hsPlay() {
     gain.gain.setValueAtTime(0.9, now + len - fade);
     gain.gain.linearRampToValueAtTime(0, now + len);
     source.onended = () => { if (hs.src === source) hsStop(); };
-    source.start(now, 0, len);
+    source.start(now, from, len);
     hs.playsUsed++;
     hs.src = source;
     button.textContent = "■ Stop snippet";

@@ -416,6 +416,15 @@ $("recap-stage").addEventListener("click", e => {
 
 // ------------------------------------------------------------------ games --
 const game = {mode: "tune", pool: [], a: null, b: null, score: 0, round: 0, busy: false, pid: null};
+// Whose songs a game uses: one person's id, or BOTH for everyone selected together ("Calin + Dominik").
+const BOTH = "all";
+const gamePidOk = p => p === BOTH ? state.people.length > 1 : state.people.includes(p);
+function gamePid() { if (!gamePidOk(game.pid)) game.pid = state.people[0]; return game.pid; }
+const gname = pid => pid === BOTH ? state.people.map(pname).join(" + ") : pname(pid);
+const gpeople = pid => pid === BOTH ? state.people.join(",") : String(pid);
+const parsePid = v => v === BOTH ? BOTH : +v;
+const personOptions = sel => [...state.people, ...(state.people.length > 1 ? [BOTH] : [])].map(p =>
+  `<option value="${p}" ${p === sel ? "selected" : ""}>${esc(gname(p))}</option>`).join("");
 const BEST_KEY = "music-stats-best";
 function bestScore(key) { try { return +(JSON.parse(localStorage.getItem(BEST_KEY) || "{}")[key] || 0); } catch { return 0; } }
 function saveBest(key, v) {
@@ -446,10 +455,7 @@ async function newGame() {
   game.score = 0; game.round = 0; game.busy = false;
   try {
     if (game.mode === "hilo") {
-      game.pid = state.people.includes(game.pid) ? game.pid : state.people[0];
-      const d = await getJSON("/api/tracks?" + listParams({people: game.pid, page: 1, size: 200, q: "", sort: "plays",
-        view: "top", level: "track", min: 0, common: 0}));
-      game.pool = shuffle(d.items.filter(i => i.plays > 0));
+      game.pool = shuffle(await poolFor(gamePid(), 200));                  // more.js; BOTH mixes everyone's songs
       if (game.pool.length < 2) throw new Error("not enough songs in this time frame; pick a wider one");
       game.a = pick(); game.b = pick();
       renderHilo();
@@ -478,13 +484,12 @@ function songCard(s, reveal, label) {
 }
 
 function renderHilo(result) {
-  const key = "hilo:" + pname(game.pid);
+  const key = "hilo:" + gname(game.pid);
   const ppl = state.people.length > 1
-    ? `<label class="g-who">Whose plays? <select id="g-person">${state.people.map(p =>
-        `<option value="${p}" ${p === game.pid ? "selected" : ""}>${esc(pname(p))}</option>`).join("")}</select></label>` : "";
+    ? `<label class="g-who">Whose plays? <select id="g-person">${personOptions(game.pid)}</select></label>` : "";
   const bPlays = result ? `<p class="g-count reveal">${game.b.plays.toLocaleString()} plays</p>` : "";
   $("game-stage").innerHTML = `${ppl}
-    <p class="g-q">${state.people.length > 1 ? esc(pname(game.pid)) + " played" : "You played"} <b>${esc(game.a.title)}</b>
+    <p class="g-q">${state.people.length > 1 ? esc(gname(game.pid)) + (game.pid === BOTH ? " together played" : " played") : "You played"} <b>${esc(game.a.title)}</b>
       ${game.a.plays.toLocaleString()} times ${esc(frameLabel())}. And this one?</p>
     <div class="g-pair">${songCard(game.a, "", `${game.a.plays.toLocaleString()} plays`)}
       <span class="g-vs">vs</span>${songCard(game.b, bPlays)}</div>
@@ -499,10 +504,10 @@ function answerHilo(higher) {
   const a = game.a.plays, b = game.b.plays;
   const ok = a === b || (higher ? b > a : b < a);
   if (ok) game.score++;
-  else saveBest("hilo:" + pname(game.pid), game.score);
+  else saveBest("hilo:" + gname(game.pid), game.score);
   renderHilo({ok});
   if (ok && !game.pool.length) {
-    saveBest("hilo:" + pname(game.pid), game.score);
+    saveBest("hilo:" + gname(game.pid), game.score);
     $("game-stage").querySelector(".g-actions").innerHTML = `<p class="g-result ok">You got through every song!</p><button type="button" data-g="again">Play again</button>`;
   }
 }
@@ -554,7 +559,7 @@ $("game-modes").addEventListener("click", e => {
   newGame();
 });
 $("game-stage").addEventListener("change", e => {
-  if (e.target.id === "g-person") { game.pid = +e.target.value; newGame(); }
+  if (e.target.id === "g-person") { game.pid = parsePid(e.target.value); newGame(); }
 });
 $("game-stage").addEventListener("click", e => {
   const g = e.target.closest("[data-g]")?.dataset.g, who = e.target.closest("[data-who]");

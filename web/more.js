@@ -255,12 +255,14 @@ function renderAwards(all) {
 const EXTRA_GAMES = {tune: startTune, bracket: startBracket, month: startMonth};
 const gameBox = () => $("game-stage");
 const pickPerson = label => state.people.length > 1
-  ? `<label class="g-who">${label} <select data-x="person">${state.people.map(p =>
-      `<option value="${p}" ${p === game.pid ? "selected" : ""}>${esc(pname(p))}</option>`).join("")}</select></label>` : "";
+  ? `<label class="g-who">${label} <select data-x="person">${personOptions(game.pid)}</select></label>` : "";
 const choose = (arr, n) => shuffle(arr.slice()).slice(0, n);
+// One person: their most played songs. BOTH: the shared ranking from the main page (joint score with the
+// entropy formula), so songs you all like come first.
 async function poolFor(pid, size = 60) {
-  const d = await getJSON("/api/tracks?" + listParams({people: pid, page: 1, size, q: "", sort: "plays",
-                                                         view: "top", level: "track", min: 0, common: 0}));
+  const shared = pid === BOTH;
+  const d = await getJSON("/api/tracks?" + listParams({people: gpeople(pid), page: 1, size, q: "", sort: shared ? "joint" : "plays",
+    formula: "entropy", view: "top", level: "track", min: 0, common: 0}));
   return d.items.filter(i => i.plays > 0);
 }
 
@@ -303,7 +305,7 @@ function isRight(guess, song) {
 
 async function startTune() {
   stopTune();
-  game.pid = state.people.includes(game.pid) ? game.pid : state.people[0];
+  gamePid();
   gameBox().innerHTML = `<p class="muted">Picking songs…</p>`;
   try {
     const all = await poolFor(game.pid, 500);                // suggestions: your top 500 (the server's maximum page)
@@ -392,6 +394,7 @@ async function nextTune() {
     if (!clip) break;
     try {
       tune.buf = await tune.ctx.decodeAudioData(clip.data);
+      tune.offset = audibleStart(tune.buf, 1, TUNE_STAGES[TUNE_STAGES.length - 1]);   // skip silent intros
       tune.cur = clip.song;
       renderTune();
       return;
@@ -403,11 +406,46 @@ async function nextTune() {
     <button type="button" data-g="again">Try again</button></div>`;
 }
 
+// Where a clip gets audible: previews often open with a fade-in, a pause or a quiet intro, and a
+// 0.1 s snippet of silence can't be recognised. Measures loudness in 50 ms steps and returns the first
+// point (in seconds) where the next `check` seconds are clearly audible, leaving room to play `play` seconds.
+// Also used by Hitster.
+function audibleStart(buf, check = 1, play = check) {
+  const step = 0.05, rate = buf.sampleRate, win = Math.round(step * rate);
+  const chans = [...Array(buf.numberOfChannels)].map((_, c) => buf.getChannelData(c));
+  const n = Math.floor(buf.length / win);
+  if (n < 4) return 0;
+  const rms = new Float32Array(n);
+  for (let w = 0; w < n; w++) {
+    let sum = 0;
+    for (const ch of chans) for (let i = w * win, end = i + win; i < end; i += 4) sum += ch[i] * ch[i];   // every 4th sample is plenty
+    rms[w] = Math.sqrt(sum / (chans.length * win / 4));
+  }
+  const sorted = [...rms].sort((a, b) => a - b);
+  let ref = sorted[Math.floor(n * 0.9)];                               // how loud the clip gets
+  if (ref < 0.005) ref = sorted[Math.floor(n * 0.99)];                 // (mostly silent clip: its loudest bit)
+  if (ref < 0.005) return 0;                                           // all quiet: nothing better to pick
+  const thr = Math.max(ref * 0.2, 0.004);
+  const need = Math.max(2, Math.ceil(Math.min(check, 3) / step));
+  const last = Math.max(0, Math.min(n - need, Math.floor((buf.duration - Math.min(play, buf.duration)) / step)));
+  let best = 0, bestSum = -1;
+  for (let i = 0; i <= last; i++) {
+    let loud = 0, sum = 0;
+    for (let j = i; j < i + need; j++) { loud += rms[j] >= thr; sum += rms[j]; }
+    if (rms[i] >= thr && rms[i + 1] >= thr && loud >= need * 0.85) return i * step;
+    if (sum > bestSum) { bestSum = sum; best = i; }
+  }
+  if (bestSum > need * thr) return best * step;                       // no clean stretch: the loudest one
+  for (let i = 0; i < n - 1; i++) if (rms[i] >= thr && rms[i + 1] >= thr) return i * step;   // sound only near the end
+  return 0;
+}
+
 function playClip(seconds) {
   if (!tune.buf) return;
   stopTune();
   if (tune.ctx.state === "suspended") tune.ctx.resume();
-  const len = Math.min(seconds ?? TUNE_STAGES[tune.stage], tune.buf.duration);
+  const from = seconds >= 30 ? 0 : tune.offset || 0;          // snippets start where the clip is audible
+  const len = Math.min(seconds ?? TUNE_STAGES[tune.stage], tune.buf.duration - from);
   const src = tune.ctx.createBufferSource(), gain = tune.ctx.createGain(), t = tune.ctx.currentTime;
   src.buffer = tune.buf;
   src.connect(gain).connect(tune.ctx.destination);
@@ -417,7 +455,7 @@ function playClip(seconds) {
   gain.gain.linearRampToValueAtTime(0.9, t + fade);
   gain.gain.setValueAtTime(0.9, t + len - fade);
   gain.gain.linearRampToValueAtTime(0, t + len);
-  src.start(t, 0, len);
+  src.start(t, from, len);
   tune.src = src;
   const bar = gameBox().querySelector(".tune-progress i");
   if (bar && !tune.done) {
@@ -484,13 +522,13 @@ function tuneGuess(text, skip) {
 
 function finishTune() {
   stopTune();
-  const key = "tune6:" + pname(game.pid), max = tune.rounds * TUNE_STAGES.length;   // new scale: own best score
+  const key = "tune6:" + gname(game.pid), max = tune.rounds * TUNE_STAGES.length;   // new scale: own best score
   saveBest(key, tune.score);
   const grid = tune.results.map(r => r.stage < 0 ? "⬛".repeat(TUNE_STAGES.length) :
     TUNE_STAGES.map((_, i) => i < r.stage ? "🟥" : i === r.stage ? "🟩" : "⬜").join("")).join("\n");
   const msg = tune.score >= max * 0.75 ? "Golden ears. 👂✨" : tune.score >= max * 0.45 ? "You know your music."
     : tune.score >= max * 0.2 ? "Some of these sounded familiar…" : "Did you even listen to these? 😄";
-  tune.share = `Name that tune · ${pname(game.pid)}’s top ${tunePoolSize()} · ${tune.score}/${max}\n${grid}`;
+  tune.share = `Name that tune · ${gname(game.pid)}’s top ${tunePoolSize()} · ${tune.score}/${max}\n${grid}`;
   gameBox().innerHTML = `<div class="g-final"><p class="huge">${tune.score} / ${max}</p><p class="big-line">${msg}</p>
     <pre class="tune-grid">${esc(grid)}</pre>
     <p class="g-score">Best ${bestScore(key)} / ${max}</p>
@@ -501,7 +539,7 @@ function finishTune() {
 const bracket = {round: [], next: [], i: 0, names: ["Round of 16", "Quarter-finals", "Semi-finals", "Final"], stage: 0};
 
 async function startBracket() {
-  game.pid = state.people.includes(game.pid) ? game.pid : state.people[0];
+  gamePid();
   gameBox().innerHTML = `<p class="muted">Seeding the bracket…</p>`;
   try {
     const pool = (await poolFor(game.pid, 16)).slice(0, 16);
@@ -542,12 +580,13 @@ function pickWinner(key) {
 function finishBracket(champ) {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem("music-stats-brackets") || "{}"); } catch { /* no storage */ }
-  saved[pname(game.pid)] = {title: champ.title, sub: champ.sub, key: champ.key, seed: champ.seed};
+  saved[gname(game.pid)] = {title: champ.title, sub: champ.sub, key: champ.key, seed: champ.seed};
   try { localStorage.setItem("music-stats-brackets", JSON.stringify(saved)); } catch { /* no storage */ }
-  const others = Object.entries(saved).filter(([n]) => n !== pname(game.pid) && state.people.some(p => pname(p) === n));
+  const others = Object.entries(saved).filter(([n]) => n !== gname(game.pid) &&
+    [...state.people, ...(state.people.length > 1 ? [BOTH] : [])].some(p => gname(p) === n));
   const note = champ.seed > 4 ? `A #${champ.seed} seed going all the way: the people’s champion.`
     : champ.seed === 1 ? "The favorite held on." : "";
-  gameBox().innerHTML = `<div class="g-final"><p class="sub-h">🏆 ${esc(pname(game.pid))}’s champion</p>
+  gameBox().innerHTML = `<div class="g-final"><p class="sub-h">🏆 ${esc(gname(game.pid))}’s champion</p>
     <div class="g-pair"><div class="g-song">${cover(champ.cover_key)}<p class="g-title">${esc(champ.title)}</p><p class="muted">${esc(champ.sub)}</p></div></div>
     <p>${esc(note)}</p>
     ${others.length ? `<p class="sub-h">Other champions</p>${others.map(([n, c]) => `<p><b>${esc(n)}</b>: ${esc(c.title)} by ${esc(c.sub)}
@@ -560,12 +599,12 @@ function finishBracket(champ) {
 const gm = {months: [], round: 0, rounds: 5, score: 0, cur: null, opts: [], songs: []};
 
 async function startMonth() {
-  game.pid = state.people.includes(game.pid) ? game.pid : state.people[0];
+  gamePid();
   gameBox().innerHTML = `<p class="muted">Flipping through your calendar…</p>`;
   try {
-    const q = new URLSearchParams({...baseParams(), people: game.pid, era: "month"});
+    const q = new URLSearchParams({...baseParams(), people: gpeople(game.pid), era: "month"});
     const f = await getJSON("/api/fun?" + q);
-    gm.months = (f.people[0]?.eras || []).map(e => e.start.slice(0, 7));
+    gm.months = [...new Set(f.people.flatMap(p => (p.eras || []).map(e => e.start.slice(0, 7))))].sort();   // BOTH: anyone's months
     if (gm.months.length < 4) throw new Error("you need at least 4 months of listening in this time frame");
     gm.round = 0; gm.score = 0;
     await nextMonth();
@@ -581,8 +620,9 @@ async function nextMonth() {
   const [y, mo] = m.split("-").map(Number);
   const last = new Date(y, mo, 0).getDate();
   gameBox().innerHTML = `${pickPerson("Whose months?")}<p class="muted">Loading…</p>`;
-  const d = await getJSON("/api/tracks?" + listParams({people: game.pid, from: `${m}-01`, to: `${m}-${String(last).padStart(2, "0")}`,
-    page: 1, size: 5, q: "", sort: "total", view: "top", level: "track", min: 0, common: 0}));
+  const d = await getJSON("/api/tracks?" + listParams({people: gpeople(game.pid), from: `${m}-01`, to: `${m}-${String(last).padStart(2, "0")}`,
+    page: 1, size: 5, q: "", sort: game.pid === BOTH ? "joint" : "total", formula: "entropy", view: "top", level: "track",
+    min: 0, common: 0}));
   gm.songs = d.items;
   renderMonth();
 }
@@ -599,7 +639,7 @@ function renderMonth(picked) {
 }
 
 function finishMonth() {
-  const key = "month:" + pname(game.pid);
+  const key = "month:" + gname(game.pid);
   saveBest(key, gm.score);
   gameBox().innerHTML = `<div class="g-final"><p class="huge">${gm.score} / ${gm.rounds}</p>
     <p class="big-line">${gm.score === gm.rounds ? "You remember everything. 📅" : gm.score >= 3 ? "Good memory." : "Time flies, huh?"}</p>
@@ -607,7 +647,7 @@ function finishMonth() {
 }
 
 $("game-stage").addEventListener("change", e => {
-  if (e.target.dataset.x === "person") { game.pid = +e.target.value; newGame(); }
+  if (e.target.dataset.x === "person") { game.pid = parsePid(e.target.value); newGame(); }
   if (e.target.dataset.x === "pool") {
     try { localStorage.setItem("music-stats-tune-pool", e.target.value); } catch { /* no storage */ }
     newGame();

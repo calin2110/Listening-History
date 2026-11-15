@@ -175,7 +175,7 @@ $("rl-body").addEventListener("click", e => {
 const wf = {rounds: 5, round: 0, score: 0, pool: [], cur: [], picks: []};
 
 async function startOrder() {
-  game.pid = state.people.includes(game.pid) ? game.pid : state.people[0];
+  gamePid();
   gameBox().innerHTML = `<p class="muted">Finding your first plays…</p>`;
   try {
     wf.pool = (await poolFor(game.pid, 300)).filter(s => s.first);
@@ -207,7 +207,7 @@ function renderOrder() {
   const right = [...wf.cur].sort((a, b) => a.first.localeCompare(b.first));
   const got = done ? wf.picks.filter((k, i) => right[i].key === k).length : 0;
   gameBox().innerHTML = `${pickPerson("Whose songs?")}
-    <p class="g-q">Round ${wf.round + 1} of ${wf.rounds}: tap them in the order you first played them, oldest first.</p>
+    <p class="g-q">Round ${wf.round + 1} of ${wf.rounds}: tap them in the order ${game.pid === BOTH ? "either of you" : "you"} first played them, oldest first.</p>
     <div class="wf-cards">${wf.cur.map(s => {
       const at = wf.picks.indexOf(s.key), pos = right.indexOf(s);
       const cls = done ? (right[at]?.key === s.key ? "ok" : "bad") : at >= 0 ? "picked" : "";
@@ -223,7 +223,7 @@ function renderOrder() {
 }
 
 function finishOrder() {
-  const key = "order:" + pname(game.pid), max = wf.rounds * 4;
+  const key = "order:" + gname(game.pid), max = wf.rounds * 4;
   saveBest(key, wf.score);
   gameBox().innerHTML = `<div class="g-final"><p class="huge">${wf.score} / ${max}</p>
     <p class="big-line">${wf.score >= max * 0.85 ? "A walking music diary. 📔" : wf.score >= max * 0.5 ? "You know your history." : "It all blurs together, doesn’t it?"}</p>
