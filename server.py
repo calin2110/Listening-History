@@ -62,6 +62,10 @@ API (all GET, JSON unless noted). Common parameters:
                   per pair: telepathy (same song within an hour, out of nowhere), most in-sync day
   /api/moods      per person: song moods (from lyrics) overall, by time of day, season and month;
                   the words you hear most in lyrics, lyric records
+  /api/arena      ?drafter=<id>&guesser=<id>[&english=0]: Lyrics Arena songs: English lyrics only,
+                  difficulty tier for the guesser, rarity, story and themed packs (docs/lyrics-arena.md)
+  /api/arena/lyrics  ?k=<track key>: lyrics and their language
+  /api/arena/block   song=<key> or artist=<name> (undo=1): songs that don't work for the lyrics game
   /api/roulette   ?people=<id>: random songs you loved but haven't played in over a year
   /api/versus     ?a=&b=&artist=: two people, one artist: rounds, who owns which song, timelines;
                   without artist: suggested close fights
@@ -73,6 +77,7 @@ API (all GET, JSON unless noted). Common parameters:
 import argparse
 import array
 import bisect
+import contextlib
 import csv
 import glob
 import hashlib
@@ -92,7 +97,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from collections import Counter, OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -3063,7 +3068,8 @@ class MoodStore:
         self.lib, self.lyrics = lib, lyrics
         self.cache = {}                                # track key -> analysis (or None: no lyrics)
         self.lock = threading.Lock()
-        self.running, self.version = False, 0
+        self.running, self.version, self.enabled = False, 0, False
+        self.urgent = deque()                          # songs to look up before the rest (lyrics arena)
         plays = Counter(p[1] for p in lib.all_raw if p[4] >= 30_000)
         self.order = [tid for tid, n in plays.most_common() if n >= 3]     # songs worth looking up, most played first
 
@@ -3082,8 +3088,34 @@ class MoodStore:
         return a
 
     def start(self):
-        self.running = True
+        self.enabled = self.running = True
         threading.Thread(target=self._run, daemon=True).start()
+
+    def prioritize(self, tids):
+        """Look these songs up next (the lyrics arena asks for songs it may offer but couldn't check yet)."""
+        if not self.enabled:
+            return                                     # --no-lyrics-scan: only fetch what someone opens
+        with self.lock:
+            queued = set(self.urgent)
+            self.urgent.extend(t for t in tids if t not in queued and not self.lyrics.get(self.lib.keys[t])[0])
+            restart = not self.running and self.urgent
+            if restart:
+                self.running = True
+        if restart:
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def _todo(self):
+        def urgent():
+            while True:
+                with self.lock:
+                    if not self.urgent:
+                        return
+                    tid = self.urgent.popleft()
+                yield tid
+        for tid in self.order:
+            yield from urgent()
+            yield tid
+        yield from urgent()
 
     def progress(self):
         done = sum(1 for tid in self.order if self.lyrics.get(self.lib.keys[tid])[0])
@@ -3091,7 +3123,7 @@ class MoodStore:
 
     def _run(self):
         n = 0
-        for tid in self.order:
+        for tid in self._todo():
             key = self.lib.keys[tid]
             if self.lyrics.get(key)[0]:
                 continue
@@ -3111,7 +3143,10 @@ class MoodStore:
             time.sleep(self.PAUSE)
         self.version += 1
         self.lyrics.save()
-        self.running = False
+        with self.lock:
+            self.running = bool(self.urgent)
+        if self.running:                               # asked for more while finishing up
+            threading.Thread(target=self._run, daemon=True).start()
 
 
 def mood_mix(store, tids_plays):
@@ -3367,6 +3402,641 @@ def versus(lib, artist, a, b, lo_ts, hi_ts, overlap=False):
             "timeline": [{"month": k, "a": A["months"][k], "b": B["months"][k]} for k in months]}
 
 
+# ------------------------------------------------------------ lyrics arena --
+# A draft for "Guess the lyrics", played like a roguelike arena run (rules: docs/lyrics-arena.md).
+# The drafter is offered themed packs of 3-5 songs and keeps one per pick, building a deck the
+# guesser has to recognise from lyric lines. This part finds the songs: English lyrics only (the
+# language would give the band away), never instrumentals, spread over the whole history instead
+# of the last few months, each with a difficulty tier for the guesser, a rarity and a story.
+# The draft itself (packs, refreshes, power-ups, scoring) runs in the page: web/arena.js.
+
+ARENA_TIERS = ("easy", "medium", "hard", "impossible")
+ARENA_TIER_MIN = (6.5, 5.0, 3.5, 2.0)                  # guesser familiarity needed for easy / medium / hard / impossible
+ARENA_MIN_PLAYS = 3                                    # it's a game for two: both of you have played every song this often
+ARENA_RARITIES = ("common", "rare", "epic", "legendary")
+ARENA_INSTRUMENTAL_GENRES = {"Soundtrack", "Video Game", "Instrumental", "New Age", "Original Score",
+                             "Classical", "Ambient", "Score"}
+YEAR_S = 365.25 * DAY
+
+_EN_WORDS = set("""the and you i to a me my it is in of that your on we be for this all so what with no don't not are
+    i'm it's can just like know when love oh now there they she he was but if never will get got one down
+    up out time feel way see make go do say let come back want need cause wanna gonna into from yeah
+    an at as by or am im ive i've i'll i'd you're you've you'll we're they're there's that's what's ain't
+    us our them their his her him who how why where here then than been have has had were would could
+    should may might must shall over under again only more some any every each other another such
+    life world night day eyes heart mind soul away still take give tell think thought said told keep
+    hold fall falling burn fire light dark dead die alive kill blood pain inside alone home baby girl boy
+    man men god hell heaven end start try cry run fight lie lies truth free fear hate stay leave gone
+    nothing everything something anything nobody everybody someone anyone always forever tonight
+    little big new old good bad right wrong left last first long""".split())
+_FILLERS = {"na", "la", "da", "ba", "sha", "doo", "dum", "oh", "ooh", "ah", "uh", "hey", "yo", "woah", "whoa"}
+_OTHER_WORDS = {l: set(w.split()) - _EN_WORDS - _FILLERS for l, w in {
+    "de": "ich und die der du nicht das ist ein mich mir es zu sie wir dich dir den auf mit sein eine einen dem des "
+          "auch noch nur wie wo wenn dann denn doch hab habe hat bin bist sind war kann mein dein kein immer nie "
+          "alles ja nein was",
+    "fi": "ja on ei se en että mä sä mun sun kun niin vaan mitä mutta kuin jos nyt minä sinä hän me te he olen "
+          "olet oli ole tää tämä tuo sen sitä mua sua mulle sulle kaikki vain vielä jo siis myös",
+    "sv": "och att det är jag du som en på med inte har för av till den mig dig vi så men om ska kan vill när här "
+          "där mitt ditt aldrig alltid",
+    "no": "og jeg er det du ikke en på som til med har for meg deg vi så men skal kan vil når her der aldri",
+    "nl": "de het een en ik je niet dat is van op te zijn mijn wat we maar met voor als ze hij nog naar",
+    "pl": "i nie się to w na jest że mnie ja ty jak co tak mi już do czy by ale jestem jesteś będzie może mam "
+          "masz tylko tu tam gdzie kiedy bo",
+    "ro": "și nu în că eu tu mă ce pe la cu o un de să e te mai sunt ești am ai fost vreau",
+    "es": "y que de no el la en me te lo mi tu es un una por con se yo para como pero más todo",
+    "fr": "je et le la les tu de que pas un une est dans mon ne me te pour qui sur ce il elle nous vous",
+    "it": "e che di non il la un una per mi ti si sono io tu con ma come più del della",
+    "pt": "e que de não o a um uma eu você me te se para com mas por meu minha",
+    "cs": "a je se na to že v jsem ty já jak už do co by mi tak ale jsi",
+    "hu": "és a az hogy nem egy is de én te meg már ha mint van csak",
+    "hr": "i je se u na da ne što sam si me te kao ali ja ti mi bi su ću će nije sve kad",
+}.items()}
+_ACCENTED = set("äöüßåøæłąęśźżćńóșțăâîéèêàçñõãíúýěščřžůőűœđ")
+_NONLATIN = re.compile(r"[Ѐ-ӿ぀-ヿ一-鿿가-힯֐-ۿ]")
+_INSTRUMENTAL_TEXT = re.compile(r"^\s*(\[?\s*instrumental\s*\]?\.?|this track is instrumental\.)\s*$", re.I)
+_PLACEHOLDER_TEXT = re.compile(r"^\s*artist:.*\n\s*album:.*\n\s*title:.*$", re.I | re.S)
+_VERSION_WORDS = r"remaster(?:ed)?|live|version|edit|re-?mix|rmx|mix|mono|stereo|acoustic|demo|session"
+_TITLE_EXTRAS = (re.compile(rf"\s+-\s+[^-]*\b(?:{_VERSION_WORDS})\b.*$", re.I),
+                 re.compile(rf"\s*[\(\[][^\)\]]*\b(?:{_VERSION_WORDS}|feat\.?|ft\.?|featuring)(?![\w])[^\)\]]*[\)\]]", re.I))
+
+
+def arena_title(title):
+    """A title the way you'd say it in the game: no "- 2012 Remaster", "(feat. …)" or "- Live at …"."""
+    s = title
+    for rx in _TITLE_EXTRAS:
+        s = rx.sub("", s)
+    return s.strip() or title
+
+
+_WORD_RX = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)?")
+_ACCENTED_RX = re.compile("[" + "".join(sorted(_ACCENTED)) + "]")
+_WORD_LANGS = {}                                       # word -> the languages whose common words include it
+for _lang, _words in _OTHER_WORDS.items():
+    for _w in _words:
+        _WORD_LANGS.setdefault(_w, []).append(_lang)
+
+
+def lyrics_language(text):
+    """What a song's lyrics are, for the lyrics game: "en", another language code ("de", "fi", "pl"…),
+    "mixed" (English with a lot of another language), "instrumental", or None (no usable lyrics:
+    nothing found, a placeholder, or under 25 words)."""
+    if not text:
+        return None
+    text = text.replace("\r", "")
+    if _INSTRUMENTAL_TEXT.match(text):
+        return "instrumental"
+    if _PLACEHOLDER_TEXT.match(text):
+        return None
+    lines = [l for l in text.split("\n") if l.strip()]
+    if lines and sum(" / " in l for l in lines) / len(lines) >= 0.4:
+        text = "\n".join(l.split(" / ", 1)[0] for l in lines)   # "original / translation": judge the original
+    low = text.lower().replace("’", "'")
+    words = _WORD_RX.findall(low)
+    if len(words) < 25:
+        return None
+    letters = (sum(map(len, words)) - sum("'" in w for w in words)) or 1   # letters, without the apostrophes
+    if len(_NONLATIN.findall(low)) / letters > 0.1:
+        return "other"
+    n = len(words)
+    en, hits = 0, dict.fromkeys(_OTHER_WORDS, 0)
+    for w, c in Counter(words).items():
+        if w in _EN_WORDS:
+            en += c
+        for lang in _WORD_LANGS.get(w, ()):
+            hits[lang] += c
+    en /= n
+    best = max(hits, key=hits.get)
+    other = hits[best] / n
+    accented = len(_ACCENTED_RX.findall(low)) / letters
+    if en >= 0.4 and other < 0.08:                     # clearly English (a name with an umlaut doesn't matter)
+        return "en"
+    if en >= 0.15 and other < en / 3 and accented < 0.015:
+        return "en"
+    if en >= 0.15:
+        return "mixed"
+    return best if other >= 0.04 or accented >= 0.015 else "other"
+
+
+def _ym(ts):
+    return datetime.fromtimestamp(ts).strftime("%b %Y") if ts else None
+
+
+class ArenaStore:
+    """The lyrics arena's songs: language checks of the cached lyrics, the list of songs and artists
+    marked as not working for the game (arena_blocklist.json), and the song pool per drafter/guesser."""
+
+    def __init__(self, lib, lyrics, meta, moods, path):
+        self.lib, self.lyrics, self.meta, self.moods, self.path = lib, lyrics, meta, moods, path
+        self.lock = threading.Lock()
+        self.busy = threading.Lock()                   # one history pass at a time (the others wait and reuse it)
+        self.lang = {}                                 # track key -> (lyrics text identity, language)
+        self.songs, self.artists = set(), set()        # blocked track keys / normalized artist names
+        self.version = 0
+        self.pools = OrderedDict()
+        self.histories = {}                            # (person, person) -> arena_history()
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    d = json.load(fh)
+                self.songs, self.artists = set(d.get("songs", [])), set(d.get("artists", []))
+            except (OSError, ValueError) as e:
+                print(f"  ! couldn't read {path}: {e}", file=sys.stderr)
+
+    def _save(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"songs": sorted(self.songs), "artists": sorted(self.artists)}, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, self.path)
+
+    def block(self, song=None, artist=None, undo=False):
+        with self.lock:
+            target = self.songs if song else self.artists
+            value = song or norm_artist(artist, True)
+            (target.discard if undo else target.add)(value)
+            self._save()
+            self.version += 1
+            self.pools.clear()
+
+    def blocklist(self):
+        lib = self.lib
+        names = {k: lib.display[lib.key_to_id[tuple(k.split("\t", 1))]] for k in self.songs
+                 if tuple(k.split("\t", 1)) in lib.key_to_id}
+        return {"songs": [{"key": k, "title": names[k][1], "sub": names[k][0]} for k in sorted(self.songs) if k in names],
+                "artists": [{"key": a, "title": lib.credit_title.get(a, a)} for a in sorted(self.artists)]}
+
+    def language(self, tid):
+        """The language of a song's cached lyrics, or "unknown" when they haven't been fetched yet."""
+        key = self.lib.keys[tid]
+        hit, text = self.lyrics.get(key)
+        if not hit:
+            return "unknown"
+        old = self.lang.get(key)
+        if old and old[0] is text:
+            return old[1]
+        lang = lyrics_language(text)
+        self.lang[key] = (text, lang)
+        return lang
+
+    def history(self, a, b):
+        """The two people's plays, boiled down (arena_history). It only depends on the listening
+        histories, so it's worked out once per pair and shared by both directions of a duel."""
+        key = (min(a, b), max(a, b))
+        if key not in self.histories:
+            with self.busy:
+                if key not in self.histories:
+                    self.histories[key] = arena_history(self.lib, *key)
+        return self.histories[key]
+
+    def pool(self, drafter, guesser, english_only=True):
+        key = (drafter, guesser, english_only, self.version, len(self.lyrics.data), tuple(self.lib.hidden))
+        with self.lock:
+            if key in self.pools:
+                self.pools.move_to_end(key)
+                return self.pools[key]
+        out = arena_pool(self, drafter, guesser, english_only)
+        with self.lock:
+            self.pools[key] = out
+            while len(self.pools) > 4:
+                self.pools.popitem(last=False)
+        return out
+
+    def warm_up(self, idle=None, lock=None):
+        """Runs once in the background after the server starts: checks the language of every cached
+        lyric and works out the first two people's pool, so the Arena opens without a wait. It waits
+        until the page has loaded its stats (idle() is true), so it doesn't slow that down."""
+        try:
+            give_up = time.time() + 300
+            while idle and not idle() and time.time() < give_up:
+                time.sleep(1)
+            t0 = time.time()
+            for tid in range(len(self.lib.keys)):
+                self.language(tid)
+            if len(self.lib.people) >= 2:
+                with lock.read() if lock else contextlib.nullcontext():   # like a request: not while data is rebuilt
+                    self.pool(0, 1)                    # also reads every song's moods once
+            if time.time() - t0 > 5:
+                print(f"  Lyrics Arena ready ({time.time() - t0:.0f}s)")
+        except Exception as e:                         # never let the warm-up take the server down
+            print(f"  ! Lyrics Arena warm-up failed: {e}", file=sys.stderr)
+
+
+def _arena_facts(lst, ymd):
+    """One person's plays of one song [(time, local day, hour)] -> the facts the packs and stories use."""
+    n = len(lst)
+    years = Counter(ymd[x[1]][0] for x in lst)
+    days = Counter(x[1] for x in lst)
+    best_day, best_day_n = days.most_common(1)[0]
+    j, win, win_at = 0, 0, (lst[0][0], lst[0][0])      # the densest 60 days
+    for k in range(n):
+        while lst[k][0] - lst[j][0] > 60 * DAY:
+            j += 1
+        if k - j + 1 > win:
+            win, win_at = k - j + 1, (lst[j][0], lst[k][0])
+    gap, gap_end = 0.0, 0
+    for k in range(1, n):
+        g = lst[k][0] - lst[k - 1][0]
+        if g > gap:
+            gap, gap_end = g, k
+    months = Counter(ymd[x[1]][1] for x in lst)
+    return {"n": n, "first": lst[0][0], "last": lst[-1][0], "years": years,
+            "peak": years.most_common(1)[0][0], "day": best_day, "day_n": best_day_n,
+            "win": win, "win_at": win_at, "gap": gap, "after_gap": n - gap_end if gap_end else 0,
+            "night": sum(1 for x in lst if 0 <= x[2] < 4),
+            "summer": sum(months[m] for m in (6, 7, 8)), "winter": sum(months[m] for m in (12, 1, 2))}
+
+
+def arena_history(lib, a, b):
+    """One pass over the history for two people: per person and song the facts (_arena_facts), the
+    songs in the order each person first played them, when each history ends, and telepathy (both
+    reached for a song within an hour, after neither had played it for a month). Plays under 30 s
+    don't count. Hidden and blocked songs are left out later, per pool."""
+    MIN_MS = 30_000
+    ymd = {}                                           # local day ordinal -> (year, month)
+    plays = {a: defaultdict(list), b: defaultdict(list)}
+    end = {a: 0.0, b: 0.0}
+    first_seen = {a: [], b: []}
+    last_play, fresh, telepathy = {}, {}, {}
+    for i, p in enumerate(lib.all_raw):
+        t, tid, pid, src, ms = p[:5]
+        if pid not in plays or not t or ms < MIN_MS:
+            continue
+        lday = lib.all_lday[i]
+        if lday not in ymd:
+            d = datetime.fromordinal(lday)
+            ymd[lday] = (d.year, d.month)
+        mine = plays[pid][tid]
+        if not mine:
+            first_seen[pid].append(tid)
+        hour = lib.all_how[i]
+        mine.append((t, lday, hour % 24 if hour != 255 else -1))
+        if t > end[pid]:
+            end[pid] = t
+        if a != b:
+            prev = last_play.get((pid, tid))
+            is_fresh = prev is None or t - prev > 30 * DAY
+            other = b if pid == a else a
+            lo = last_play.get((other, tid))
+            if is_fresh and lo is not None and t - lo <= 3600 and fresh.get((other, tid)) and tid not in telepathy:
+                telepathy[tid] = (max(1, round((t - lo) / 60)), iso_day(t))
+            last_play[(pid, tid)] = t
+            fresh[(pid, tid)] = is_fresh
+    facts = {pid: {tid: _arena_facts(lst, ymd) for tid, lst in plays[pid].items()} for pid in plays}
+    return {"facts": facts, "end": end, "first_seen": first_seen, "telepathy": telepathy}
+
+
+def arena_pool(store, D, G, english_only=True):
+    """Every song that can go into a lyrics-arena deck drafted by person D for person G, with its
+    difficulty tier, rarity, story and the themed packs ("categories") it belongs to. Both of you have
+    played every song at least ARENA_MIN_PLAYS times: you play it together, the drafter presents it
+    and sings along. Beyond that, everything is seen from the guesser's side: the tier, the rarity and
+    the stories come from G's history, and the packs rank songs by G's plays."""
+    lib, meta, moods = store.lib, store.meta, store.moods
+    names = (lib.people[D], lib.people[G])
+    h = store.history(D, G)
+    hidden = {k[2:] for k in lib.hidden} | store.artists
+    drop = {tid for tid, c in enumerate(lib.credits) if c & hidden} if hidden else set()
+    drop |= {lib.key_to_id[tuple(k.split("\t", 1))] for k in store.songs if tuple(k.split("\t", 1)) in lib.key_to_id}
+    FD, FG, end = h["facts"][D], h["facts"][G], h["end"]
+    first_seen = {who: [t for t in h["first_seen"][who] if t not in drop] for who in (D, G)}
+    telepathy = {t: v for t, v in h["telepathy"].items() if t not in drop}
+
+    # ---- lyrics: language per song, and per artist for songs whose lyrics aren't fetched yet
+    main_artist = [k.split("\t", 1)[0] for k in lib.keys]
+    candidates = (set(FD) | set(FG)) - drop
+    lang = {tid: store.language(tid) for tid in candidates}
+    by_artist = defaultdict(Counter)
+    for tid, l in lang.items():
+        if l != "unknown":
+            by_artist[main_artist[tid]][l or "none"] += 1
+
+    def usable(tid):
+        """'en' (checked), 'en?' (not fetched yet, but the artist sings in English), or None."""
+        l = lang[tid]
+        if l == "unknown":
+            m = meta.get(tid) or {}
+            c = by_artist.get(main_artist[tid], Counter())
+            known = sum(c.values())
+            if m.get("genre") in ARENA_INSTRUMENTAL_GENRES or (known and c["instrumental"] / known >= 0.5):
+                return None
+            if known >= 2 and c["en"] / known >= 0.8:
+                return "en?"
+            if not english_only and (not known or c["en"] / known < 0.8):
+                return "?"
+            return None
+        if l in (None, "instrumental"):
+            return None
+        if l == "en":
+            return "en"
+        return None if english_only else l
+
+    F = {tid: (FD.get(tid), FG.get(tid)) for tid in candidates}
+
+    def familiarity(f, pid):
+        """How well someone knows a song: log2(1 + plays), fading with the years since they last played it
+        (halved after four years: a song you played to death years ago is still in your head)."""
+        if not f:
+            return 0.0
+        return math.log2(1 + f["n"]) / (1 + (end[pid] - f["last"]) / YEAR_S / 4)
+
+    pool, tier_of, fam = [], {}, {}
+    for tid in candidates:
+        fd, fg = F[tid]
+        nd, ng = (fd or {}).get("n", 0), (fg or {}).get("n", 0)
+        if nd < ARENA_MIN_PLAYS or ng < ARENA_MIN_PLAYS or not usable(tid):
+            continue
+        fam_g = familiarity(fg, G)
+        tier = next((i for i, least in enumerate(ARENA_TIER_MIN) if fam_g >= least), None)
+        if tier is None:
+            continue                                   # the guesser barely knows it: no fun
+        tier_of[tid], fam[tid] = tier, fam_g
+        pool.append(tid)
+    in_pool = set(pool)
+
+    # ---- the packs
+    cats = []                                          # {id, family, name, emoji, rar, weight, desc, songs: [tid], stories}
+
+    def cat(cid, family, name, emoji, rar, weight, desc, ranked, story=None, extra=None):
+        songs = [t for t in ranked if t in in_pool]
+        if len(songs) >= 3:
+            cats.append({"id": cid, "family": family, "name": name, "emoji": emoji, "rar": rar, "weight": weight,
+                         "desc": desc, "songs": songs, "story": story, **(extra or {})})
+
+    nD, nG = names
+    P = lambda tid, who: (F[tid][0 if who == D else 1] or {})
+    cnt = lambda tid, who: P(tid, who).get("n", 0)
+    ago = lambda tid, who: (end[who] - P(tid, who).get("last", end[who])) / YEAR_S
+    by_g = lambda ts: sorted(ts, key=lambda t: (-cnt(t, G), -cnt(t, D)))   # the guesser's plays decide the order
+
+    def share_g(t, key):
+        n = cnt(t, G)
+        return P(t, G).get(key, 0) / n if n else 0
+
+    cat("forgotten_g", "forgotten_g", f"{nG}’s forgotten favourites", "💭", 2, 1.0,
+        f"Songs {nG} played at least 15 times but not once in the last year of their history, and {nD} has played too.",
+        sorted((t for t in pool if cnt(t, G) >= 15 and ago(t, G) >= 1 and cnt(t, D) >= 1), key=lambda t: -cnt(t, G)),
+        lambda t: f"{nG} played it {cnt(t, G)}×, last in {_ym(P(t, G)['last'])}")
+    cat("forgotten_d", "forgotten_d", f"{nD}’s old favourites", "🧳", 1, 0.6,
+        f"Songs {nD} played at least 15 times but not in the last year, and {nG} knows too.",
+        sorted((t for t in pool if cnt(t, D) >= 15 and ago(t, D) >= 1 and cnt(t, G) >= 1), key=lambda t: -cnt(t, D)),
+        lambda t: f"{nD} played it {cnt(t, D)}×, last in {_ym(P(t, D)['last'])}; {nG} {cnt(t, G)}×")
+
+    # the guesser's all-time top: ranked among everything they played, not only what's in the pool
+    g_rank = {t: i + 1 for i, t in enumerate(sorted((t for t in candidates if cnt(t, G) >= 20), key=lambda t: -cnt(t, G)))}
+    cat("top_g", "top_g", f"{nG}’s all-time favourites", "🏆", 0, 0.6, f"{nG}’s most played songs ever.",
+        sorted((t for t in pool if g_rank.get(t, 10 ** 9) <= 200), key=lambda t: g_rank[t]),
+        lambda t: f"{nG}’s #{g_rank[t]} song of all time ({cnt(t, G)} plays)")
+
+    end_year = {who: datetime.fromtimestamp(end[who]).year if end[who] else 0 for who in (D, G)}
+    for who, fam_id, emoji, weight in ((G, "year_g", "🗓️", 1.0), (D, "year_d", "📼", 0.6)):
+        name = lib.people[who]
+        years = Counter()
+        for t in pool:
+            for y, k in P(t, who).get("years", {}).items():
+                if k >= 4:
+                    years[y] += 1
+        for y in sorted(years):
+            if y >= end_year[who]:
+                continue                               # the current year is what you already think of
+            ranked = sorted((t for t in pool if P(t, who).get("years", {}).get(y, 0) >= 4),
+                            key=lambda t: -P(t, who)["years"][y])[:80]
+            rank = {t: i + 1 for i, t in enumerate(ranked)}
+            ranked = [t for t in ranked if not (who == G and ago(t, G) < 0.5 and cnt(t, G) >= 3 and y < end_year[G] - 1)]
+            if who == D:
+                ranked = [t for t in ranked if cnt(t, G) >= 1]   # the drafter's year, but songs the guesser knows
+            old = end_year[who] - y >= 4
+            cat(f"{fam_id}:{y}", fam_id, f"{name}’s {y}", emoji, 2 if old and who == G else 1, weight,
+                f"The songs {name} played most in {y}.", ranked,
+                (lambda y, rank, who=who, name=name:
+                 lambda t: f"{name}’s #{rank[t]} song of {y} ({P(t, who)['years'][y]} plays that year)")(y, rank),
+                {"year": y, "rank": rank})
+
+    release = defaultdict(list)
+    genre = defaultdict(list)
+    for t in pool:
+        m = meta.get(t) or {}
+        try:
+            y = int(m.get("year") or 0)
+        except (TypeError, ValueError):
+            y = 0
+        if 1950 <= y <= datetime.now().year + 1:
+            release[y].append(t)
+        if m.get("genre"):
+            genre[m["genre"]].append(t)
+    for y, ts in sorted(release.items()):
+        if len(ts) >= 8:
+            cat(f"release:{y}", "release", f"{y} vibes", "📅", 0, 1.0, f"Songs released in {y}.", by_g(ts),
+                None, {"year": y})
+    decades = defaultdict(list)
+    for y, ts in release.items():
+        decades[y // 10 * 10].extend(ts)
+    for dec, ts in sorted(decades.items()):
+        if dec < datetime.now().year // 10 * 10:          # the current decade is no throwback
+            cat(f"decade:{dec}", "decade", f"{dec}s throwbacks", "📻", 0, 0.6, f"Songs released in the {dec}s.",
+                by_g(ts), None, {"year": dec})
+    for g, ts in sorted(genre.items()):
+        if len(ts) >= 30 and g not in ARENA_INSTRUMENTAL_GENRES:
+            cat(f"genre:{g}", "genre", g, "🎛️", 0, 0.4, f"Songs Apple Music files under {g}.", by_g(ts))
+
+    cat("shared", "shared", "Shared anthems", "🤝", 0, 1.0, "Songs both of you played at least 10 times.",
+        by_g(t for t in pool if cnt(t, D) >= 10 and cnt(t, G) >= 10))
+    cat("g_more", "g_more", f"More {nG}’s than {nD}’s", "🎁", 0, 0.6,
+        f"Songs you both know, but {nG} played at least three times as often.",
+        sorted((t for t in pool if cnt(t, G) >= 3 * cnt(t, D)), key=lambda t: -cnt(t, G)),
+        lambda t: f"{nG} {cnt(t, G)}×, {nD} {cnt(t, D)}×")
+
+    def fling(t):
+        f = P(t, G)
+        return f and f["n"] >= 8 and f["win"] / f["n"] >= 0.75 and end[G] - f["win_at"][1] >= YEAR_S
+    fling_story = lambda t: (lambda f: f"{nG}: {f['win']} of {f['n']} plays between {_ym(f['win_at'][0])} "
+                                       f"and {_ym(f['win_at'][1])}")(P(t, G))
+    cat("flings", "flings", f"{nG}’s one-season flings", "🌞", 2, 0.8,
+        f"Songs {nG} played over and over for two months, at least a year ago, and then hardly again.",
+        sorted((t for t in pool if fling(t)), key=lambda t: -P(t, G)["win"]), fling_story)
+
+    # 719163 = the day number of 1 Jan 1970: a binge counts when it was a year before the guesser's last play
+    binged = lambda t: (lambda f: f and f["day_n"] >= 5 and end[G] / DAY + 719163 - f["day"] >= 365)(P(t, G))
+    # the guesser's biggest one-day binges, measured against their own habits (some people loop a song
+    # 100 times a day, others never pass 15): of the songs in the pool, the top 10 are legendary, the next
+    # 20 epic and the next 50 rare
+    binges = sorted((t for t in pool if binged(t)), key=lambda t: -P(t, G)["day_n"])[:80]
+    binge_level = {t: 3 if i < 10 else 2 if i < 30 else 1 for i, t in enumerate(binges)}
+    binge_story = lambda t: (lambda f, d: f"{nG} played it {f['day_n']}× in one day ({d.day} {d:%b %Y})")(
+        P(t, G), datetime.fromordinal(P(t, G)["day"]))
+    cat("binge", "binge", f"{nG} on repeat", "🔁", 2, 0.8,
+        f"{nG}’s biggest one-day binges: songs played over and over in a single day, a year or more ago.",
+        binges, binge_story)
+
+    art_plays = defaultdict(Counter)                   # main artist -> {person: plays}
+    art_songs = defaultdict(list)
+    for t in candidates:
+        a = main_artist[t]
+        art_plays[a][D] += cnt(t, D)
+        art_plays[a][G] += cnt(t, G)
+        art_songs[a].append(t)
+    shared_artists = {a for a, c in art_plays.items() if c[D] >= 30 and c[G] >= 30}
+    top5 = {a: set(by_g(art_songs[a])[:5]) for a in shared_artists}
+    cat("deep_cuts", "deep_cuts", "Deep cuts", "💎", 1, 0.8,
+        f"Songs by bands you both love that aren’t among the five {nG} plays most.",
+        by_g(t for t in pool if main_artist[t] in shared_artists and t not in top5[main_artist[t]]))
+    cat("big_hits", "big_hits", "The hits of bands you share", "🎸", 0, 0.8,
+        f"The songs {nG} plays most by bands you both love.",
+        by_g(t for a in shared_artists for t in top5[a] if t in in_pool))
+
+    albums = defaultdict(list)
+    for t in pool:
+        if lib.album_name[t]:
+            albums[(main_artist[t], norm_album(lib.album_name[t], True))].append(t)
+    for (a, al), ts in albums.items():
+        if len(ts) >= 4 and sum(cnt(t, G) for t in ts) >= 30:
+            cat(f"album:{a}\t{al}", "album", lib.album_name[ts[0]], "💿", 1, 0.7,
+                f"Songs from one album by {lib.display[ts[0]][0]}: guess which track it is.", by_g(ts),
+                None, {"same_artist": True})
+    by_art = defaultdict(list)
+    for t in pool:
+        by_art[main_artist[t]].append(t)
+    for a, ts in by_art.items():
+        if len(ts) >= 5 and art_plays[a][G] >= 15:
+            cat(f"artist:{a}", "artist", f"All {lib.display[ts[0]][0]}", "🎤", 0, 0.7,
+                f"Only songs by {lib.display[ts[0]][0]}.", by_g(ts), None, {"same_artist": True})
+
+    cat("night", "night", f"{nG}’s demon hours", "🌙", 1, 0.6, f"Songs {nG} mostly plays between midnight and 4 am.",
+        sorted((t for t in pool if share_g(t, "night") >= 0.5 and P(t, G).get("night", 0) >= 5),
+               key=lambda t: -share_g(t, "night")),
+        lambda t: f"{round(share_g(t, 'night') * 100)}% of {nG}’s plays were between midnight and 4 am")
+    for key, cid, label, emoji, months in (("summer", "summer", "summer songs", "☀️", "June to August"),
+                                           ("winter", "winter", "winter songs", "❄️", "December to February")):
+        cat(cid, cid, f"{nG}’s {label}", emoji, 0, 0.4, f"Songs {nG} mostly plays from {months}.",
+            sorted((t for t in pool if share_g(t, key) >= 0.6 and cnt(t, G) >= 6), key=lambda t: -share_g(t, key)),
+            lambda t, key=key, months=months: f"{round(share_g(t, key) * 100)}% of {nG}’s plays were from {months}")
+    for who, cid, emoji, rar, weight in ((G, "firsts_g", "🐣", 2, 0.8), (D, "firsts_d", "🥚", 1, 0.5)):
+        order = {t: i for i, t in enumerate(first_seen[who][:300])}
+        cat(cid, cid, f"{lib.people[who]}’s first discoveries", emoji, rar, weight,
+            f"Among the first 300 songs in {lib.people[who]}’s history.",
+            sorted((t for t in order if t in in_pool and (who == G or cnt(t, G) >= 1)), key=lambda t: order[t]),
+            (lambda who: lambda t: f"One of the first songs in {lib.people[who]}’s history ({_ym(P(t, who)['first'])})")(who))
+    comeback = lambda t: (lambda f: f and f["gap"] >= YEAR_S and f["after_gap"] >= 2)(P(t, G))
+    cat("comebacks", "comebacks", f"{nG}’s comebacks", "🔙", 1, 0.6,
+        f"Songs {nG} went back to after more than a year without them.",
+        sorted((t for t in pool if comeback(t)), key=lambda t: -P(t, G)["gap"]),
+        lambda t: f"{nG} came back to it after {P(t, G)['gap'] / YEAR_S:.1f} years")
+    if D != G:
+        cat("telepathy", "telepathy", "Telepathy", "🔮", 3, 1.0,
+            "Songs you both put on within an hour of each other, after neither had played them for a month.",
+            sorted(telepathy, key=lambda t: telepathy[t][1], reverse=True),
+            lambda t: f"You both put it on within {telepathy[t][0]} min on {telepathy[t][1]}")
+        for a, b, cid in ((D, G, "crossover_dg"), (G, D, "crossover_gd")):
+            ts = [t for t in pool if cnt(t, a) >= 5 and cnt(t, b) >= 5 and P(t, b)["first"] - P(t, a)["first"] >= 30 * DAY]
+            cat(cid, "crossover", f"{lib.people[a]} got {lib.people[b]} into these", "🧬", 1, 0.6,
+                f"Songs {lib.people[a]} played first and {lib.people[b]} picked up more than a month later.",
+                sorted(ts, key=lambda t: -(P(t, b)["first"] - P(t, a)["first"])),
+                (lambda a, b: lambda t: f"{lib.people[a]} found it in {_ym(P(t, a)['first'])}, "
+                                        f"{lib.people[b]} started in {_ym(P(t, b)['first'])}")(a, b))
+    one_hit = lambda t, least: cnt(t, G) >= least and cnt(t, G) / max(1, art_plays[main_artist[t]][G]) >= 0.9
+    cat("one_hit", "one_hit", "One-hit wonders", "🦄", 1, 0.5, f"The one song of an artist that {nG} actually plays.",
+        by_g(t for t in pool if one_hit(t, 10)), lambda t: f"The only {lib.display[t][0]} song {nG} plays ({cnt(t, G)}×)")
+    if moods:
+        by_mood = defaultdict(list)
+        for t in pool:
+            a = moods.song(t)
+            if a and a.get("mood"):
+                m, v = max(a["mood"].items(), key=lambda kv: kv[1])
+                if v >= 0.45:
+                    by_mood[m].append(t)
+        for m, label, emoji in MOODS:
+            cat(f"mood:{m}", "mood", f"{label} songs", emoji, 0, 0.5, f"Songs whose lyrics are mostly about {label.lower()}.",
+                by_g(by_mood.get(m, [])))
+    cat("wildcard", "wildcard", "Wildcard", "🎲", 0, 0.8, "Anything from the whole history, every year equally likely.",
+        by_g(pool))
+
+    # ---- rarity: how special the song's story is for the guesser (Hearthstone colours)
+    year_rank = defaultdict(dict)                      # track -> {year: G's rank that year}, past years only
+    g_years = Counter()
+    for t in pool:
+        for y, k in P(t, G).get("years", {}).items():
+            if k >= 4 and y < end_year[G]:
+                g_years[y] += 1
+    for y in g_years:
+        ranked = sorted((t for t in pool if P(t, G).get("years", {}).get(y, 0) >= 4), key=lambda t: -P(t, G)["years"][y])
+        for i, t in enumerate(ranked[:30]):
+            year_rank[t][y] = i + 1
+    first100 = {who: set(first_seen[who][:100]) for who in (D, G)}
+
+    def rarity_of(t):
+        best = [0, None]
+
+        def up(r, text):
+            if r > best[0]:
+                best[0], best[1] = r, text
+        fg = F[t][1]
+        if t in telepathy:
+            up(3, f"Telepathy: you both put it on within {telepathy[t][0]} min on {telepathy[t][1]}")
+        if t in first100[D] and t in first100[G]:
+            up(3, "One of the first 100 songs in both your histories")
+        if not fg:
+            return best                                # the guesser never played it: nothing special for them
+        if t in binge_level:
+            up(binge_level[t], binge_story(t))
+        for y, r in sorted(year_rank.get(t, {}).items(), key=lambda yr: yr[1]):
+            old = end_year[G] - y >= 3
+            text = f"{nG}’s #{r} song of {y} ({fg['years'][y]} plays that year)"
+            if r == 1 and old and ago(t, G) >= 2:
+                up(3, text + ", then silence")
+            elif r <= 10 and old:
+                up(2, text)
+            else:
+                up(1, text)
+        if t in first100[G]:
+            up(1, f"One of the first 100 songs in {nG}’s history ({_ym(fg['first'])})")
+        if fg["n"] >= 40 and ago(t, G) >= 1:
+            up(2 if fg["n"] >= 100 else 1, f"{nG} played it {fg['n']}×, last in {_ym(fg['last'])}")
+        if fling(t):
+            up(2, fling_story(t))
+        if fg["gap"] >= 2 * YEAR_S and fg["after_gap"] >= 3:
+            up(1, f"{nG} came back to it after {fg['gap'] / YEAR_S:.1f} years")
+        if one_hit(t, 20):
+            up(1, f"The only {lib.display[t][0]} song {nG} plays ({fg['n']}×)")
+        if fg["n"] >= 8 and fg["night"] / fg["n"] >= 0.7:
+            up(1, f"{round(fg['night'] / fg['n'] * 100)}% of {nG}’s plays were between midnight and 4 am")
+        return best
+
+    rarity, story = {}, {}
+    for t in pool:
+        rarity[t], story[t] = rarity_of(t)
+    cat("legends", "legends", "Legends", "✨", 3, 1.0, "Only legendary songs: the rarest stories in your history.",
+        by_g(t for t in pool if rarity[t] == 3))
+
+    # ---- the response: songs as compact rows, packs as lists of row numbers
+    idx = {t: i for i, t in enumerate(pool)}
+    songs = []
+    for t in pool:
+        fd, fg = F[t]
+        m = meta.get(t) or {}
+        artist, title = lib.display[t]
+        songs.append({
+            "k": lib.keys[t], "t": arena_title(title), "a": artist, "al": lib.album_name[t], "y": m.get("year"), "g": m.get("genre"),
+            "tier": tier_of[t], "fam": round(fam[t], 2), "rar": rarity.get(t, 0), "story": story.get(t),
+            "p": [(fd or {}).get("n", 0), (fg or {}).get("n", 0)],
+            "first": [_ym((fd or {}).get("first")), _ym((fg or {}).get("first"))],
+            "last": [_ym((fd or {}).get("last")), _ym((fg or {}).get("last"))],
+            # the year the guesser played it most (the drafter's, if the guesser never did): packs spread over these
+            "era": (fg or fd)["peak"],
+            "recent": bool(fg and end[G] - fg["last"] <= 60 * DAY),   # the guesser played it in the last two months
+            "lang": usable(t),
+        })
+    tiers = Counter(tier_of[t] for t in pool)
+    return {
+        "drafter": D, "guesser": G, "names": list(names), "english_only": english_only,
+        "tiers": [{"id": ARENA_TIERS[i], "songs": tiers[i]} for i in range(4)],
+        "songs": songs,
+        "categories": [{k: v for k, v in c.items() if k not in ("songs", "story", "rank")}
+                       | {"songs": [idx[t] for t in c["songs"]]}
+                       | ({"stories": [c["story"](t) for t in c["songs"]]} if c["story"] else {})
+                       for c in cats],
+        "lyrics": moods.progress() if moods else None,
+        "unchecked": sum(1 for s in songs if s["lang"] == "en?"),
+    }
+
+
 # ------------------------------------------------------------------ server --
 
 class BadParam(ValueError):
@@ -3423,9 +4093,18 @@ class Handler(BaseHTTPRequestHandler):
     data_lock = ReadWriteLock()
     hidden_path = "hidden_artists.json"
     UNLOCKED = {"/api/cover", "/api/lyrics", "/api/preview",   # don't touch the play data, and can be slow
-                "/api/concerts", "/api/concert"}                  # (these two take the read lock themselves)
+                "/api/concerts", "/api/concert",                  # (these two take the read lock themselves)
+                "/api/arena/lyrics", "/api/arena/block"}
+    arena = None
     concerts = concert_cache = None
     verbose = False
+    flight_lock, in_flight, last_busy = threading.Lock(), 0, time.time()   # stats requests being worked on
+
+    @classmethod
+    def idle(cls):
+        """No stats request running, and none for 3 seconds: the page has what it needs."""
+        with cls.flight_lock:
+            return cls.in_flight == 0 and time.time() - cls.last_busy > 3
 
     def log_message(self, fmt, *args):
         if self.verbose:
@@ -3457,6 +4136,8 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/concerts": self.api_concerts, "/api/concert": self.api_concert, "/api/versus": self.api_versus,
                 "/api/extras": self.api_extras, "/api/roulette": self.api_roulette, "/api/moods": self.api_moods,
                 "/api/cover": self.api_cover, "/api/lyrics": self.api_lyrics,
+                "/api/arena": self.api_arena, "/api/arena/lyrics": self.api_arena_lyrics,
+                "/api/arena/block": self.api_arena_block,
             }.get(url.path)
             if route:
                 if url.path in self.UNLOCKED:
@@ -3465,8 +4146,15 @@ class Handler(BaseHTTPRequestHandler):
                     with Handler.data_lock.write():        # rebuilds the data: nobody reads meanwhile
                         return route(qs)
                 t0 = time.time()
-                with Handler.data_lock.read():             # stats requests run side by side
-                    route(qs)
+                with Handler.flight_lock:
+                    Handler.in_flight += 1
+                try:
+                    with Handler.data_lock.read():         # stats requests run side by side
+                        route(qs)
+                finally:
+                    with Handler.flight_lock:
+                        Handler.in_flight -= 1
+                        Handler.last_busy = time.time()
                 took = time.time() - t0
                 if took >= 1.0:                            # so you can tell which part of the page is slow
                     print(f"  slow: {url.path}{'?part=' + qs['part'] if qs.get('part') else ''} took {took:.1f}s")
@@ -3845,6 +4533,43 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "No cover found"}, 404, {"Cache-Control": "public, max-age=86400"})
 
+    # -- lyrics arena (web/arena.js, rules in docs/lyrics-arena.md)
+    def api_arena(self, qs):
+        """?drafter=<id>&guesser=<id>[&english=0]: the songs a draft can offer, with tiers, rarities and packs."""
+        try:
+            d, g = int(qs.get("drafter", 0)), int(qs.get("guesser", 1))
+        except ValueError:
+            raise BadParam("drafter and guesser must be person ids")
+        n = len(self.lib.people)
+        if not (0 <= d < n and 0 <= g < n) or d == g:
+            raise BadParam("drafter and guesser must be two different people")
+        out = self.arena.pool(d, g, qs.get("english", "1") != "0")
+        unchecked = [self.lib.key_to_id[tuple(s["k"].split("\t", 1))] for s in out["songs"] if s["lang"] == "en?"]
+        self.moods.prioritize(unchecked)               # check these songs' lyrics next, in the background
+        self.send_json({**out, "blocked": self.arena.blocklist()})
+
+    def api_arena_lyrics(self, qs):
+        """?k=<track key>: the lyrics (fetched from lrclib.net if needed) and what language they're in."""
+        tid = self._track_key(qs)
+        if tid is None:
+            return                                     # (already answered: unknown song)
+        key = self.lib.keys[tid]
+        hit, text = self.lyrics.get(key)
+        if not hit:
+            artist, title = self.lib.display[tid]
+            try:
+                text = lookup_lyrics(artist, title)
+            except Exception as e:
+                return self.send_json({"error": f"Couldn't reach lrclib.net: {e}"}, 502)
+            self.lyrics.set(key, text)
+        self.send_json({"text": text or None, "lang": lyrics_language(text) if text else None})
+
+    def api_arena_block(self, qs):
+        """song=<track key> or artist=<name>, undo=1 to take it back: songs that don't work for the lyrics game."""
+        if qs.get("song") or qs.get("artist"):
+            self.arena.block(song=qs.get("song"), artist=qs.get("artist"), undo=qs.get("undo") == "1")
+        self.send_json(self.arena.blocklist())
+
     def api_lyrics(self, qs):
         found = self.lib.key_index.get(qs.get("k", ""))
         if not found or found[0].name != "track":
@@ -3896,6 +4621,8 @@ def main():
     ap.add_argument("--meta-cache", default="meta_cache.json", help="genres, years, lengths, previews")
     ap.add_argument("--hidden", default="hidden_artists.json", help="artists left out of all stats (edited from the page)")
     ap.add_argument("--concerts", default="concerts.json", help="your upcoming concerts (edited from the page)")
+    ap.add_argument("--arena-blocklist", default="arena_blocklist.json",
+                    help="songs and artists marked as not working for the Lyrics Arena (edited from the page)")
     ap.add_argument("--no-lyrics-scan", action="store_true",
                     help="don't fetch lyrics in the background (song moods and lyric words then only cover "
                          "songs whose lyrics you opened)")
@@ -3949,6 +4676,10 @@ def main():
     if not args.no_lyrics_scan:
         Handler.moods.start()
     Handler.concerts = ConcertStore(args.concerts)
+    Handler.arena = ArenaStore(lib, Handler.lyrics, Handler.meta, Handler.moods, args.arena_blocklist)
+    warm = threading.Timer(10, Handler.arena.warm_up, args=(Handler.idle, Handler.data_lock))   # once the page has loaded
+    warm.daemon = True
+    warm.start()
     Handler.concert_cache = JsonCache("concert_cache.json")
     for k in [k for k in Handler.concert_cache.data if k.startswith("set:")]:   # never keep setlists around
         del Handler.concert_cache.data[k]

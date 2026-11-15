@@ -755,3 +755,308 @@ dialog::backdrop{background:rgba(10,12,20,.6)}
 .mood-time text{fill:var(--muted);font-size:11px}
 .lyric-words{margin-top:8px}
 @media (max-width:600px){.mood-row{grid-template-columns:110px 1fr}}
+
+/* ------------------------------------------------------------ lyrics arena */
+.arena-dlg{width:min(1180px,98vw);max-height:94vh;
+  --common:#8d96a3;--rare:#2f8cf0;--epic:#b04fd6;--legendary:#f08c00}
+.arena-dlg .dlg-head{flex-wrap:wrap}
+.arena-dlg .dlg-head h2,.arena-dlg .dlg-head p{margin:0}
+.arena-dlg .dlg-head p{color:var(--muted);font-size:.9rem}
+.arena-dlg[open]{display:flex;flex-direction:column}
+.arena-dlg .dlg-head{flex:none}
+.ar-sound-btn{margin-left:auto;padding:7px 10px}
+.arena-dlg .dlg-head .ar-rules-btn{margin-left:0}
+.arena-dlg .dlg-head .close{margin-left:0}
+.arena-body{padding:18px 22px 26px;overflow:auto;flex:1;min-height:0}
+.rar-common{--rar:var(--common)}.rar-rare{--rar:var(--rare)}.rar-epic{--rar:var(--epic)}.rar-legendary{--rar:var(--legendary)}
+.ar-intro p{margin:0 0 8px}
+.ar-resume{border:2px solid var(--accent);border-radius:12px;padding:12px 16px;margin-bottom:16px}
+.ar-resume p{margin:0}
+.ar-resume .g-actions{justify-content:flex-start;margin-top:10px}
+.ar-setup{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:14px;margin-top:14px}
+.ar-setup fieldset{border:1px solid var(--line);border-radius:12px;padding:10px 14px 14px;margin:0;display:flex;flex-direction:column;gap:8px}
+.ar-setup legend{font-weight:700;padding:0 6px}
+.ar-setup select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:5px 8px}
+.ar-setup label{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ar-setup .g-actions{grid-column:1/-1;margin-top:4px}
+.ar-players{margin:0;display:flex;gap:8px;align-items:center}
+.ar-hof,.ar-blocklist{margin-top:16px}
+.ar-hof summary,.ar-blocklist summary{cursor:pointer;font-weight:600}
+.ar-blocklist ul{columns:2;padding-left:18px}
+.ar-status{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:10px}
+.ar-who{font-weight:700}
+.ar-refresh{font-weight:700;background:var(--bg);border-radius:999px;padding:3px 10px}
+.ar-fx{font-size:.82rem;background:rgba(127,127,127,.15);border-radius:999px;padding:3px 10px}
+.ar-floors{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px}
+.ar-floor{position:relative;border:1px solid var(--line);border-radius:10px;padding:6px 10px;display:flex;justify-content:space-between;
+  overflow:hidden;font-size:.88rem;background:var(--bg)}
+.ar-floor span,.ar-floor b{position:relative;z-index:1}
+.ar-floor i{position:absolute;inset:0 auto 0 0;background:rgba(127,127,127,.18)}
+.ar-floor.now{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.ar-floor.done{opacity:.75}
+.ar-draft{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:18px;align-items:start}
+@media (max-width:860px){.ar-draft{grid-template-columns:1fr}.ar-floors{grid-template-columns:repeat(2,1fr)}}
+.ar-theme{display:flex;gap:14px;align-items:center;border:2px solid var(--rar);border-radius:14px;padding:10px 14px;margin-bottom:14px;
+  background:linear-gradient(90deg,color-mix(in srgb,var(--rar) 14%,transparent),transparent)}
+.ar-theme.boss{box-shadow:0 0 0 2px var(--legendary),0 0 22px color-mix(in srgb,var(--legendary) 45%,transparent)}
+.ar-theme-emoji{font-size:2.2rem;line-height:1}
+.ar-theme-name{font-size:1.25rem;font-weight:800;margin:0}
+.ar-theme p{margin:2px 0 0}
+.ar-theme-rar{margin-left:auto;font-weight:700;color:var(--rar);white-space:nowrap}
+.ar-pack{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+/* a card has two faces: the front (the song) and the back (before it's turned over, see .is-down) */
+.ar-card{position:relative;perspective:1100px;transition:transform .15s}
+.ar-card:hover{transform:translateY(-3px)}
+.ar-card.picked{opacity:.5;transform:none}
+.ar-card-inner{position:relative;height:100%;transform-style:preserve-3d;transition:transform .55s cubic-bezier(.3,1.35,.5,1)}
+.ar-card.is-down .ar-card-inner{transform:rotateY(180deg)}
+.ar-card-front{position:relative;height:100%;box-sizing:border-box;border:3px solid var(--rar);border-radius:16px;background:var(--panel);
+  display:flex;flex-direction:column;backface-visibility:hidden;-webkit-backface-visibility:hidden}
+.ar-card.is-down .ar-card-front{pointer-events:none}
+.ar-card-back{position:absolute;inset:0;border-radius:16px;border:3px solid #39406a;padding:0;margin:0;cursor:pointer;color:#fff;font:inherit;
+  transform:rotateY(180deg);backface-visibility:hidden;-webkit-backface-visibility:hidden;display:grid;place-items:center;--gs:0px;
+  background:radial-gradient(circle at 50% 46%,transparent 0 23%,rgba(255,224,102,.24) 23% 24%,transparent 24% 31%,rgba(255,224,102,.14) 31% 32%,transparent 32%),
+    repeating-linear-gradient(45deg,rgba(255,255,255,.035) 0 7px,transparent 7px 14px),linear-gradient(160deg,#2a3463,#121731);
+  box-shadow:inset 0 0 0 5px #121731,inset 0 0 0 7px #c9a227}
+.ar-card:not(.is-down) .ar-card-back{pointer-events:none}
+.ar-card-back span{font-size:2.6rem;filter:drop-shadow(0 0 10px rgba(255,224,102,.45))}
+.ar-card-main{display:flex;flex-direction:column;gap:3px;text-align:left;font:inherit;color:inherit;background:none;border:0;
+  padding:10px 10px 4px;cursor:pointer;flex:1}
+.ar-card-main:disabled{cursor:default}
+.ar-card img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;background:var(--line);margin-bottom:4px}
+.ar-gem{position:absolute;top:14px;right:14px;z-index:1;background:var(--rar);color:#fff;font-size:.68rem;font-weight:700;
+  padding:2px 8px;border-radius:999px;letter-spacing:.02em}
+.ar-card-title{font-weight:800;line-height:1.2}
+.ar-card-sub{color:var(--muted);font-size:.88rem}
+.ar-card-story{font-size:.84rem;font-style:italic;line-height:1.3}
+.ar-card-facts{font-size:.76rem;color:var(--muted)}
+.ar-card-tags{display:flex;flex-wrap:wrap;gap:4px}
+.ar-card-tags i{font-style:normal;font-size:.7rem;background:rgba(127,127,127,.15);border-radius:999px;padding:1px 7px}
+.ar-card-ban{padding:0 10px 8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:.8rem}
+.ar-ban-menu{display:flex;gap:6px;flex-wrap:wrap}
+.ar-ban-menu button{font:inherit;font-size:.76rem;border:1px solid var(--line);border-radius:999px;background:var(--bg);color:inherit;
+  padding:2px 8px;cursor:pointer}
+.ar-pack-actions{justify-content:flex-start}
+.ar-pack-actions .ghost{margin-left:0}
+.ar-pending{font-weight:700;margin:0 0 8px}
+.ar-deck{border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:.88rem;background:var(--bg)}
+.ar-deck h3{margin:0 0 6px;font-size:1rem}
+.ar-deck-tier{margin:8px 0 2px;font-weight:700}
+.ar-deck-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
+.ar-deck-list li{display:flex;gap:6px;align-items:flex-start;border-radius:6px}
+.ar-dot{flex:none;width:9px;height:9px;border-radius:50%;background:var(--rar);margin-top:6px}
+.ar-deck-song{display:flex;flex-direction:column;min-width:0;flex:1}
+.ar-deck-song b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ar-deck-song small{color:var(--muted)}
+.ar-bad{color:#e03131!important}
+.ar-deck-song small.ar-deck-line{font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ar-sheet{border:1px solid var(--line);border-radius:14px;padding:12px 16px;margin-top:14px;background:var(--bg)}
+.ar-sheet h3{margin:0 0 4px}
+.ar-sheet h4{margin:14px 0 6px}
+.ar-sheet-list{margin:0;padding-left:30px}
+.ar-sheet-list li{margin:0 0 12px;border-left:3px solid var(--rar,transparent);padding-left:10px}
+.ar-sheet-list li::marker{color:var(--muted);font-weight:700}
+.ar-sheet-lyric p{margin:0;font-weight:700;font-size:1.05rem}
+.ar-sheet-hints,.ar-sheet-answer{margin:3px 0 0;font-size:.85rem;color:var(--muted)}
+.ar-sheet-hints b{font-weight:600;margin-right:4px}
+.ar-sheet-answer b{color:var(--ink)}
+.ar-sheet-answer .ar-pill{font-size:.68rem;padding:1px 7px;vertical-align:1px}
+.ar-sheet .g-actions{justify-content:flex-start}
+.ar-sheets-end{text-align:center;margin-top:18px;border-top:1px solid var(--line);padding-top:10px}
+.ar-items{padding-left:0;list-style:none;margin:4px 0 0;display:flex;flex-direction:column;gap:3px}
+.ar-event{border:2px dashed var(--line);border-radius:16px;padding:16px;text-align:center}
+.ar-event.treasure{border-color:var(--legendary)}
+.ar-event-title{font-size:1.35rem;font-weight:800;margin:0 0 6px}
+.ar-loot{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-top:10px}
+.ar-pu{display:flex;flex-direction:column;gap:4px;align-items:center;text-align:center;font:inherit;color:inherit;background:var(--panel);
+  border:2px solid var(--rar,var(--line));border-radius:14px;padding:12px;cursor:pointer}
+.ar-pu:hover{border-color:var(--accent)}
+.ar-pu-emoji{font-size:2rem;line-height:1}
+.ar-pu small{color:var(--muted)}
+.ar-pu i{font-style:normal;font-size:.72rem;background:rgba(127,127,127,.15);border-radius:999px;padding:1px 8px}
+.ar-pu.small{flex-direction:row;padding:6px 10px;border-width:1px;border-radius:999px;font-size:.9rem}
+.ar-pu:disabled{opacity:.45;cursor:default}
+.ar-facedown{width:140px;height:190px;margin:12px auto;border-radius:14px;display:grid;place-items:center;font-size:4rem;font-weight:800;
+  color:#fff;background:repeating-linear-gradient(45deg,var(--epic),var(--epic) 10px,var(--rare) 10px,var(--rare) 20px)}
+.ar-years{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:10px}
+.ar-years button{font:inherit;border:1px solid var(--line);background:var(--bg);color:inherit;border-radius:8px;padding:6px 10px;cursor:pointer}
+.ar-pill{display:inline-block;font-size:.75rem;font-weight:700;border-radius:999px;padding:2px 9px;color:#fff;background:var(--rar,#666)}
+.ar-handoff{text-align:center;padding:30px 10px}
+.ar-big{font-size:3.4rem;margin:0;line-height:1.1}
+.ar-turn-head{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);
+  padding-bottom:10px;margin-bottom:14px}
+.ar-scores{display:flex;gap:12px}
+.ar-scores span{border-left:4px solid var(--c);padding-left:6px}
+.ar-present-song{display:flex;gap:14px;align-items:center;border:2px solid var(--rar);border-radius:14px;padding:10px;margin-bottom:10px}
+.ar-present-song img{width:96px;height:96px;border-radius:10px;object-fit:cover;background:var(--line)}
+.ar-present-song p{margin:2px 0}
+.ar-present-help p{margin:4px 0}
+.ar-present-help .g-actions{justify-content:flex-start;margin-top:6px}
+.ar-count{display:inline-flex;gap:6px;align-items:center}
+.ar-count .ghost{margin:0;padding:2px 10px}
+.ar-lyric-pick{list-style:none;padding:0;margin:10px 0;display:flex;flex-direction:column;gap:1px;max-height:46vh;overflow:auto;
+  border:1px solid var(--line);border-radius:10px}
+.ar-lyric-pick button{width:100%;text-align:left;font:inherit;color:inherit;background:none;border:0;padding:5px 10px;cursor:pointer}
+.ar-lyric-pick button:hover{background:rgba(127,127,127,.12)}
+.ar-lyric-pick li.sel button{background:color-mix(in srgb,var(--accent) 16%,transparent);font-weight:700}
+.ar-sticky{position:sticky;bottom:0;background:var(--panel);padding:8px 0;margin-top:8px}
+.ar-guess{text-align:center}
+.ar-guess-meta{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center}
+.ar-stars{font-size:1.5rem;color:var(--legendary);letter-spacing:.1em}
+.ar-lyrics{font-size:clamp(1.3rem,3vw,2.2rem);line-height:1.35;font-weight:700;margin:22px auto;max-width:900px}
+.ar-lyrics p{margin:.2em 0}
+.ar-lyrics.small{font-size:1.15rem;margin:8px auto}
+.ar-info{font-size:1.1rem;font-weight:600}
+.ar-penalty{font-size:.85rem}
+.ar-hand{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center}
+.ar-hand .sub-h{margin:0;width:100%}
+.ar-guess-actions .ghost,.ar-reveal .ghost{margin-left:0}
+.ar-reveal{text-align:center}
+.ar-reveal .ar-present-song{max-width:640px;margin:0 auto 10px;text-align:left}
+.ar-result{font-size:1.3rem;font-weight:800}
+.ar-result.ok{color:#2f9e44}.ar-result.bad{color:#e03131}
+.ar-loot-msg{font-weight:700}
+.ar-sing{border:1px dashed var(--line);border-radius:12px;padding:10px;max-width:640px;margin:10px auto}
+.ar-results{text-align:center}
+.ar-final{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin:10px 0}
+.ar-final div{border-top:5px solid var(--c);background:var(--bg);border-radius:12px;padding:12px 18px;display:flex;flex-direction:column;min-width:200px}
+.ar-final .huge{font-size:2.8rem;font-weight:800;line-height:1.1}
+.ar-moments{text-align:left;max-width:700px;margin:0 auto}
+.ar-rules{max-width:860px;margin:0 auto;line-height:1.5}
+.ar-rules h3{font-size:1.4rem}
+.ar-rules h4{margin:18px 0 4px;font-size:1.08rem}
+.ar-rules .g-actions{justify-content:flex-start;margin-top:0}
+.ar-rules .ghost{margin-left:0}
+.ar-table{border-collapse:collapse;margin:6px 0}
+.ar-table td,.ar-table th{border:1px solid var(--line);padding:4px 10px;text-align:left}
+.arena-dlg .g-actions button.ghost{color:var(--ink);background:none;border:1px solid var(--line)}
+.arena-dlg .g-actions button:disabled{opacity:.45;cursor:default}
+.ar-setup label.ar-radio,.ar-setup label.ar-check{display:block;line-height:1.5}
+.ar-setup label.ar-radio input,.ar-setup label.ar-check input{margin:0 6px 0 0;vertical-align:middle}
+/* ---- Hearthstone-style effects: rarity glows, card flips, bursts (arena.js "effects") */
+@property --ar-ang{syntax:"<angle>";inherits:false;initial-value:0deg}
+.ar-card.dealt{animation:ar-deal .45s cubic-bezier(.2,.9,.3,1.25) backwards;animation-delay:calc(var(--i) * 90ms)}
+@keyframes ar-deal{from{transform:translateY(-60px) rotate(-10deg) scale(.7);opacity:0}}
+/* face down, a card glows in its rarity's colour: the pack tells you what's coming */
+.ar-card.is-down.rar-rare .ar-card-back{--gs:5px;animation:ar-glow 1.1s ease-in-out infinite alternate}
+.ar-card.is-down.rar-epic .ar-card-back{--gs:9px;animation:ar-glow .9s ease-in-out infinite alternate}
+.ar-card.is-down.rar-legendary .ar-card-back{--gs:14px;animation:ar-glow .7s ease-in-out infinite alternate}
+@keyframes ar-glow{from{box-shadow:inset 0 0 0 5px #121731,inset 0 0 0 7px #c9a227,0 0 8px 1px var(--rar)}
+  to{box-shadow:inset 0 0 0 5px #121731,inset 0 0 0 7px #c9a227,0 0 calc(var(--gs) * 3) var(--gs) var(--rar)}}
+.ar-card.charging{animation:ar-charge .95s ease-in forwards;z-index:2}
+.ar-card.charging .ar-card-back{--gs:22px;animation:ar-glow .16s ease-in-out infinite alternate}
+@keyframes ar-charge{0%{transform:none}20%{transform:rotate(-2deg) scale(1.02)}40%{transform:rotate(2deg) scale(1.04)}
+  60%{transform:rotate(-3deg) scale(1.06)}80%{transform:rotate(3deg) scale(1.08)}100%{transform:scale(1.1)}}
+.ar-card.charging-sm{animation:ar-charge-sm .32s ease-in-out}
+@keyframes ar-charge-sm{50%{transform:scale(1.05) rotate(-1deg)}}
+.ar-card.ar-gone{animation:ar-gone .35s ease-in forwards;pointer-events:none}
+@keyframes ar-gone{to{transform:translateY(30px) scale(.9);opacity:0}}
+/* face up: legendary cards get a turning golden frame and sparkles, epic ones a pulse, rare ones a sheen */
+.ar-card.rar-legendary .ar-card-front,.ar-present-song.rar-legendary{border-color:transparent;
+  background:linear-gradient(var(--panel),var(--panel)) padding-box,
+    conic-gradient(from var(--ar-ang),#f08c00,#ffe066,#fff9db,#ffa94d,#d9480f,#f08c00) border-box;
+  box-shadow:0 0 20px color-mix(in srgb,var(--legendary) 50%,transparent);animation:ar-spin 3.2s linear infinite}
+@keyframes ar-spin{to{--ar-ang:360deg}}
+.ar-card.rar-epic .ar-card-front,.ar-present-song.rar-epic{animation:ar-pulse 2.6s ease-in-out infinite}
+@keyframes ar-pulse{0%,100%{box-shadow:0 0 8px color-mix(in srgb,var(--epic) 30%,transparent)}
+  50%{box-shadow:0 0 24px color-mix(in srgb,var(--epic) 65%,transparent)}}
+.ar-card:is(.rar-rare,.rar-epic,.rar-legendary) .ar-card-front::after{content:"";position:absolute;inset:0;border-radius:13px;pointer-events:none;
+  background:linear-gradient(105deg,transparent 35%,rgba(255,255,255,.16) 48%,rgba(255,255,255,.05) 52%,transparent 65%);
+  background-size:300% 100%;animation:ar-sheen 5s ease-in-out infinite}
+@keyframes ar-sheen{0%,55%{background-position:120% 0}100%{background-position:-20% 0}}
+.ar-card.rar-legendary .ar-card-front::before{content:"";position:absolute;inset:-7px;border-radius:22px;pointer-events:none;
+  background:radial-gradient(circle at 10% 14%,#fff 0 1.5px,transparent 2.2px),radial-gradient(circle at 92% 26%,#ffe066 0 2px,transparent 2.6px),
+    radial-gradient(circle at 16% 84%,#ffe066 0 1.6px,transparent 2.2px),radial-gradient(circle at 86% 92%,#fff 0 1.5px,transparent 2.2px),
+    radial-gradient(circle at 52% 3%,#ffd43b 0 1.4px,transparent 2px);animation:ar-twinkle 1.6s ease-in-out infinite alternate}
+@keyframes ar-twinkle{from{opacity:.15;transform:scale(.98)}to{opacity:1;transform:scale(1.02)}}
+.ar-theme.fx-in{animation:ar-theme-in .5s cubic-bezier(.2,.9,.3,1.2)}
+@keyframes ar-theme-in{from{transform:translateX(-30px);opacity:0}}
+.ar-theme.boss.fx-in{animation:ar-boss-in .8s cubic-bezier(.2,.9,.3,1.2)}
+@keyframes ar-boss-in{0%{transform:scale(.6);opacity:0}60%{transform:scale(1.05);opacity:1}100%{transform:none}}
+.ar-theme:is(.rar-epic,.rar-legendary){position:relative;overflow:hidden}
+.ar-theme:is(.rar-epic,.rar-legendary)::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(105deg,transparent 35%,rgba(255,255,255,.14) 50%,transparent 65%);background-size:300% 100%;
+  animation:ar-sheen 4s ease-in-out infinite}
+.ar-deck-list li.ar-new{animation:ar-newpick 1.4s ease-out}
+@keyframes ar-newpick{from{background:color-mix(in srgb,var(--rar) 45%,transparent)}to{background:transparent}}
+.ar-event.treasure{position:relative;overflow:hidden}
+.ar-event.treasure::before{content:"";position:absolute;left:50%;top:34px;width:760px;height:760px;margin:-380px 0 0 -380px;pointer-events:none;
+  background:repeating-conic-gradient(from 0deg,rgba(255,212,59,.09) 0deg 4deg,transparent 4deg 16deg);
+  -webkit-mask:radial-gradient(circle,#000 0 12%,transparent 55%);mask:radial-gradient(circle,#000 0 12%,transparent 55%);
+  animation:ar-rotate 24s linear infinite}
+.ar-event.treasure>*{position:relative}
+.ar-event.treasure .ar-event-title{animation:ar-pop .5s cubic-bezier(.3,1.6,.5,1)}
+.ar-event.treasure .ar-pu{animation:ar-deal .5s cubic-bezier(.2,.9,.3,1.25) backwards;animation-delay:calc(.15s + var(--i) * 110ms)}
+@keyframes ar-rotate{to{transform:rotate(360deg)}}
+@keyframes ar-pop{from{transform:scale(.4);opacity:0}}
+.ar-facedown{animation:ar-float 2.4s ease-in-out infinite;box-shadow:0 0 22px 4px color-mix(in srgb,var(--epic) 55%,transparent)}
+@keyframes ar-float{50%{transform:translateY(-6px) rotate(1deg)}}
+.ar-done .ar-pill{animation:ar-pop .45s cubic-bezier(.3,1.6,.5,1) backwards;animation-delay:calc(.1s + var(--i) * .12s)}
+/* the game's reveal: the card turns in, the stars pop, a miss shakes */
+.ar-reveal.fresh .ar-present-song{animation:ar-flipin .6s cubic-bezier(.3,1.3,.5,1) backwards}
+.ar-reveal.fresh .ar-present-song.rar-legendary{animation:ar-flipin .6s cubic-bezier(.3,1.3,.5,1) backwards,ar-spin 3.2s linear infinite}
+.ar-reveal.fresh .ar-present-song.rar-epic{animation:ar-flipin .6s cubic-bezier(.3,1.3,.5,1) backwards,ar-pulse 2.6s ease-in-out infinite}
+@keyframes ar-flipin{from{transform:perspective(900px) rotateY(90deg) scale(.9);opacity:0}}
+.ar-stars-fx{display:inline-flex;gap:1px;color:var(--legendary)}
+.ar-star{display:inline-block}
+.ar-star:not(.on){opacity:.35}
+.ar-reveal.fresh .ar-star{animation:ar-star .5s cubic-bezier(.3,1.7,.5,1) backwards;animation-delay:calc(.45s + var(--i) * .16s)}
+@keyframes ar-star{from{transform:scale(0) rotate(-40deg);opacity:0}}
+.ar-reveal.fresh .ar-result.bad{animation:ar-shake-x .5s .3s}
+@keyframes ar-shake-x{20%,60%{transform:translateX(-6px)}40%,80%{transform:translateX(6px)}}
+.ar-reveal.fresh .ar-loot-msg{animation:ar-pop .6s 1s cubic-bezier(.3,1.6,.5,1) backwards}
+/* the layer the sparks fly in, above everything in the dialog */
+.ar-fx-layer{position:fixed;inset:0;pointer-events:none;z-index:30;overflow:hidden}
+.ar-burst{position:absolute;width:0;height:0}
+.ar-burst b{position:absolute;left:0;top:0;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);border-radius:50%;
+  background:var(--c);box-shadow:0 0 6px var(--c),0 0 12px var(--c);animation:ar-spark var(--d) cubic-bezier(.1,.75,.3,1) forwards}
+@keyframes ar-spark{from{transform:translate(0,0) scale(1);opacity:1}to{transform:translate(var(--dx),var(--dy)) scale(.25);opacity:0}}
+.ar-ring{position:absolute;left:-12px;top:-12px;width:24px;height:24px;border-radius:50%;border:3px solid var(--c);box-shadow:0 0 12px var(--c);
+  animation:ar-ring .75s ease-out forwards}
+.ar-ring.late{animation-delay:.15s;animation-fill-mode:both}
+@keyframes ar-ring{from{transform:scale(.5);opacity:1}to{transform:scale(14);opacity:0}}
+.ar-rays{position:absolute;left:-320px;top:-320px;width:640px;height:640px;border-radius:50%;
+  background:repeating-conic-gradient(from 0deg,color-mix(in srgb,var(--c) 60%,transparent) 0deg 5deg,transparent 5deg 15deg);
+  -webkit-mask:radial-gradient(circle,#000 0 15%,transparent 62%);mask:radial-gradient(circle,#000 0 15%,transparent 62%);
+  animation:ar-rays 1.7s ease-out forwards}
+@keyframes ar-rays{0%{transform:rotate(0) scale(.2);opacity:0}15%{opacity:1}100%{transform:rotate(70deg) scale(1.15);opacity:0}}
+.ar-flash{position:absolute;inset:0;background:radial-gradient(circle at var(--x) var(--y),rgba(255,214,102,.55),rgba(255,169,77,.15) 40%,transparent 70%);
+  animation:ar-flash .95s ease-out forwards}
+@keyframes ar-flash{from{opacity:1}to{opacity:0}}
+.ar-callout{position:absolute;transform:translate(-50%,-50%);font-weight:900;font-size:clamp(1.6rem,5vw,2.6rem);letter-spacing:.08em;
+  text-transform:uppercase;color:#fff;-webkit-text-stroke:1px color-mix(in srgb,var(--c) 70%,#000);white-space:nowrap;
+  text-shadow:0 0 10px var(--c),0 0 24px var(--c),0 2px 0 rgba(0,0,0,.4);animation:ar-callout 1.7s ease-out forwards}
+@keyframes ar-callout{0%{transform:translate(-50%,-50%) scale(.3);opacity:0}14%{transform:translate(-50%,-50%) scale(1.2);opacity:1}
+  28%{transform:translate(-50%,-50%) scale(1)}75%{opacity:1}100%{transform:translate(-50%,-110%) scale(1);opacity:0}}
+.arena-body.ar-shake{animation:ar-shake .45s}
+@keyframes ar-shake{10%,90%{transform:translate(-1px,0)}20%,80%{transform:translate(3px,1px)}30%,50%,70%{transform:translate(-5px,-1px)}
+  40%,60%{transform:translate(5px,1px)}}
+.ar-showcase{position:absolute;inset:0;pointer-events:auto;cursor:pointer;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:10px;padding:16px;background:rgba(8,10,20,.84);animation:ar-fade .25s ease-out}
+.ar-showcase.out{animation:ar-fade .25s ease-in reverse forwards}
+@keyframes ar-fade{from{opacity:0}to{opacity:1}}
+.ar-showcase-card{width:min(260px,72vw)}
+.ar-showcase-cap{color:#fff;font-weight:800;font-size:1.2rem;text-align:center;margin:6px 0 0;opacity:0;transition:opacity .3s}
+.ar-showcase.shown .ar-showcase-cap{opacity:1}
+.ar-showcase-tap{color:#adb5bd;font-size:.85rem;margin:0}
+@media (max-width:420px){.ar-wide-only{display:none}}
+@media (prefers-reduced-motion:reduce){.arena-dlg *,.arena-dlg *::before,.arena-dlg *::after{animation:none!important}}
+@media (max-width:600px){
+  .arena-dlg{width:100%;height:100%;max-width:100%;max-height:100%;margin:0;border-radius:0}
+  .arena-dlg .dlg-head{padding:10px 12px;gap:6px 10px}
+  .arena-dlg .dlg-head p{display:none}
+  .arena-dlg .dlg-head h2{font-size:1.15rem}
+  .arena-body{padding:14px 12px 20px}
+  .ar-theme{flex-wrap:wrap;gap:4px 12px;padding:10px 12px}
+  .ar-theme>div{flex:1;min-width:0}
+  .ar-theme-name{font-size:1.1rem}
+  .ar-theme-rar{margin-left:0;flex-basis:100%;font-size:.85rem}
+  .ar-pack{grid-template-columns:1fr;gap:10px}
+  .ar-card:hover{transform:none}
+  .ar-pack .ar-card-main{display:grid;grid-template-columns:76px minmax(0,1fr);column-gap:12px;row-gap:2px;align-content:start}
+  .ar-pack .ar-card-main img{grid-column:1;grid-row:1/span 7;width:76px;margin:0}
+  .ar-pack .ar-card-main>span{grid-column:2}
+  .ar-pack .ar-gem{position:static;justify-self:start}
+  .ar-table{display:block;overflow-x:auto}
+  .ar-lyrics{margin:14px auto}
+}

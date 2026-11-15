@@ -214,6 +214,7 @@ function syncUI() {
   $("cap").value = state.cap;
   $("vs-open").hidden = META.people.length < 2;
   $("hitster-open").hidden = META.people.length < 2;
+  $("arena-open").hidden = META.people.length < 2;
   $("copy").disabled = state.level !== "track";
   $("copy").title = state.level === "track" ? "" : "Switch to Songs to copy a playlist";
 

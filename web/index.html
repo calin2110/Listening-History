@@ -79,6 +79,7 @@
         <button type="button" class="fun-btn" id="recap-open">▶ Play your recap</button>
         <button type="button" class="fun-btn ghostish" id="game-open">Play a game</button>
         <button type="button" class="fun-btn ghostish" id="hitster-open" hidden>🎵 Hitster</button>
+        <button type="button" class="fun-btn ghostish" id="arena-open" hidden>🏟️ Lyrics Arena</button>
         <button type="button" class="fun-btn ghostish" id="vs-open" hidden>⚔️ Versus</button>
         <button type="button" class="fun-btn ghostish" id="rl-open">🎰 Rediscover roulette</button>
         <button type="button" class="fun-btn ghostish" id="cx-open">🎤 Prepare for a concert</button>
@@ -196,6 +197,19 @@
     <div id="hitster-body" class="hitster-body"></div>
   </dialog>
 
+  <dialog id="arena-dlg" class="arena-dlg" aria-labelledby="arena-title">
+    <div class="dlg-head">
+      <div>
+        <h2 id="arena-title">🏟️ Lyrics Arena</h2>
+        <p>Draft each other’s songs, then guess them from the lyrics.</p>
+      </div>
+      <button type="button" class="ghost ar-sound-btn" id="arena-sound" aria-pressed="true" title="Sound effects">🔊</button>
+      <button type="button" class="ghost ar-rules-btn" id="arena-rules">📜 <span class="ar-wide-only">Rules</span></button>
+      <button type="button" class="close" id="arena-close" aria-label="Close">×</button>
+    </div>
+    <div id="arena-body" class="arena-body"></div>
+  </dialog>
+
   <dialog id="hide-dlg" class="hide-dlg" aria-labelledby="hide-title">
     <div class="dlg-head">
       <div>
@@ -263,6 +277,7 @@
   <script src="extras.js"></script>
   <script src="moods.js"></script>
   <script src="hitster.js"></script>
+  <script src="arena.js"></script>
 </body>
 
 </html>
