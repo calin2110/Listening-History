@@ -7,7 +7,8 @@ song. Every extra line is a hint, and at the end you sing it. The hard part was 
 rankings only show fixed time frames, and memory pulls you towards whatever you played last month. The
 Lyrics Arena does the picking with you. It offers themed packs of songs from your whole history, and you
 draft a deck one pick at a time, the way Hearthstone's Arena drafts a deck card by card. Roguelike pieces
-(rarities, refreshes, treasure, events, a boss pack, power-ups) make the draft a game of its own, and packs
+(a blessing to start, floors in a hidden random order, rarities, refreshes, treasure, events, a boss pack,
+power-ups you keep in your hand and click to use) make the draft a game of its own, and packs
 open like Hearthstone packs: face down, turning over one by one, with rare, epic and legendary cards bursting
 open in their colours. With every pick you also choose the lyric lines the guesser will get, and at the end
 each deck becomes a **lyric sheet** to write on paper. Playing on the screen instead is optional.
@@ -46,8 +47,8 @@ The **📜 Rules** button in the game shows the same rules as this page.
    be checked first. Once the page has loaded, the server also prepares the Arena in the background, so the
    draft starts without a wait (see [Speed](#speed)).
 2. Click **🏟️ Lyrics Arena**, choose **Duel**, **10 songs per floor**, **5 refreshes**, and start.
-3. The first drafter drafts while the other one looks away, choosing the lyric for every song they pick.
-   Then the second drafter drafts.
+3. The first drafter chooses a blessing, then drafts while the other one looks away, choosing the lyric for
+   every song they pick. Then the second drafter does the same.
 4. Write each deck's lyric sheet on paper (or copy or print it) and play away from the screen. Or tap
    **▶ Play on this screen** and play here.
 
@@ -57,7 +58,7 @@ The **📜 Rules** button in the game shows the same rules as this page.
 | --- | --- |
 | **Who plays** | The two people. Defaults to the people selected at the top of the page. |
 | **Duel** | Both draft a deck for the other. Then you alternate: A presents to B, B presents to A. Most points wins. |
-| **One deck** | Only one person drafts, the other only guesses. The guesser starts with two random power-ups for the game. |
+| **One deck** | Only one person drafts, the other only guesses. The drafter collects the guessing power-ups for the guesser. |
 | **Songs per floor** | 3, 5 or 10. With 10 you get the classic 40 songs: 10 Easy, 10 Medium, 10 Hard, 10 Impossible. |
 | **Refreshes** | 3, 5 (default) or 8 pack refreshes per draft. |
 | **English lyrics only** | On by default. Songs in another language give the band away. Off allows any language (still no instrumentals). |
@@ -68,9 +69,28 @@ The **📜 Rules** button in the game shows the same rules as this page.
 The device goes to the drafter. The guesser must not see the screen, since the packs show the songs they'll
 have to guess.
 
-**Floors.** The draft goes through four floors in order: 🌱 Easy, 🔥 Medium, 💀 Hard, 👹 Impossible. You fill each
-with the chosen number of songs. The floor tracker at the top shows your progress, and the deck panel on the
-right lists what you've drafted.
+**🌅 A blessing to start.** Like Neow in Slay the Spire, before the first pack you choose one of three blessings,
+one of them with a price:
+
+| | Blessing | Effect |
+| --- | --- | --- |
+| 🎁 | Treasure trove | Choose a draft power-up and a guessing power-up, from three each. |
+| 🔄 | Spare refreshes | +3 refreshes. |
+| ✨ | Legendary opener | Your first pack is the rarest one there is. |
+| 🧰 | Bag of tricks | Two random draft power-ups. |
+| 🤝 | Helping hand | Two random guessing power-ups. |
+| 🔮 | Second sight | Your first 10 packs show which floor they're for. |
+| 🎰 | Gambler's bargain | **Lose 2 refreshes**: two random draft and two random guessing power-ups. |
+| 🍀 | Born lucky | **Lose 1 refresh**: epic and legendary packs come up twice as often, all draft long. |
+| 👑 | Dragon's hoard | **No refreshes at all**: three treasure picks right away. |
+
+**Floors, in a hidden random order.** Your deck still gets the chosen number of songs on each floor (🌱 Easy,
+🔥 Medium, 💀 Hard, 👹 Impossible), but the order of the floors is shuffled at the start and you don't see it.
+A pack is always for one floor ("🎲 floor hidden" in its corner). You find out which one once you've picked: the
+lyric step opens with "It's a Hard song" and its floor's rule for the line, and the song shows up under its floor
+in the deck. The 🔭 Spyglass, the 🧭 Compass and Second sight show a pack's floor in advance. The floor tracker
+shows how full each floor is, and the status bar shows the pick number, your refreshes and when the next
+treasure comes. (The cards still show the guesser's plays, so a careful drafter can guess.)
 
 **Packs.** Every pick shows a **pack**: a theme (for example "💭 Dominik's forgotten favourites" or "📅 2017 vibes")
 and 3 to 5 songs for the current floor. Click a song to put it in your deck and the pack is gone. Pack size
@@ -97,21 +117,27 @@ slipped through, an instrumental, a song with no findable lyrics, or anything el
 straight away from the same theme, and it doesn't cost a refresh. The start screen lists everything blocked,
 with an undo for each.
 
-**🎁 Treasure.** After you finish each floor, choose one of three random power-ups. After the last floor the
-treasure only contains power-ups for the game (in a duel), since the draft is over. Rarely, a treasure chest
-also turns up in the middle of a floor.
+**🎁 Treasure.** After every fifth of the draft (after picks 8, 16, 24 and 32 of 40), you take **one draft
+power-up and one guessing power-up**, each from three. Together with a blessing that's about five of each by
+the end of the draft. Rarely, a 🧰 chest on the way offers the same.
 
-**Events.** At most one per floor, by chance (about half the floors get one):
-- 🎴 **A face-down card**: a song from this floor, Rare or better, that you take blind and only see once it's
+**🎒 Your hand.** Power-ups wait as little round icons under the floors: blue for the draft, gold for guessing.
+Click a draft one to use it. Most act on the pack in front of you and only work before you've picked from it
+(an icon is greyed out when it can't be used right now; hover it for what it does). Guessing ones can't be
+clicked in the draft: they're for the game. In a duel the drafter keeps them for their own turns as guesser;
+with one deck the drafter collects them for the guesser. They're listed on the lyric sheet with a box to tick.
+
+**Events.** At most one between two treasures, by chance:
+- 🎴 **A face-down card**: a song, Rare or better, that you take blind and only see (with its floor) once it's
   in your deck. Or leave it and get a normal pack.
 - 🧳 **A travelling trader**: offers a random power-up for one refresh.
 
-**👑 The boss pack.** The last pick of the Impossible floor. It's an Epic or Legendary pack whenever one is
-available, and the song you pick from it is worth double in the game.
+**👑 The boss pack.** The very last pick of the draft. It's an Epic or Legendary pack whenever one is available,
+and the song you pick from it is worth double in the game.
 
 **Swaps.**
-- ♻️ The **Mulligan** power-up lets you throw out one drafted song whenever you like during the draft, and
-  draft a replacement for its floor.
+- ♻️ The **Mulligan** power-up: click it, then click ♻️ next to a song in your deck to throw it out and draft
+  a replacement for its floor (click the Mulligan again to keep it for later).
 - When a picked song's lyrics turn out not to be English (or not to exist), the lyric step says so and you can
   pick another song. If you keep it anyway, the deck marks it ⚠️ and offers **swap it (free)**.
 
@@ -348,28 +374,39 @@ With English-only off, unchecked songs from artists with no checked songs at all
 
 ## Power-ups
 
-**For the draft** (they act at once):
+You get them from the blessing, the treasures, chests and the trader, and keep them in your hand until you
+click them.
+
+**For the draft** (blue icons, click to use; "this pack" means the pack in front of you, before you pick from it):
 
 | | Power-up | Effect |
 | --- | --- | --- |
 | 🔄 | Second wind | +2 refreshes. |
-| 🃏 | Wide pack | The next 3 packs show 5 songs. |
-| 🍒 | Cherry-pick | You choose the theme of the next pack from three. |
-| ⏳ | Time machine | The next pack is "{year} vibes" for a release year you choose. |
-| 👯 | Two for one | Take two songs from the next pack (if the floor has room for two). |
+| 🃏 | Wide pack | Two more songs in this pack (up to 5), from its theme. |
+| 🍒 | Cherry-pick | Swap this pack for a theme you choose, from three (same floor). |
+| ⏳ | Time machine | Swap this pack for "{year} vibes", a release year you choose (same floor). |
+| 👯 | Two for one | Take two songs from this pack (when the floor has two picks left, and not on the boss pick). |
 | 🍀 | Lucky charm | Epic and legendary packs come up twice as often for the rest of the draft. |
-| ♻️ | Mulligan | Kept: swap out one drafted song whenever you like during this draft. |
+| ♻️ | Mulligan | Throw one song out of your deck and draft a new one for its floor. |
+| 🔭 | Spyglass | See which floor this pack is for. |
+| 🧭 | Compass | Choose the floor of this pick: the pack is swapped for one from that floor. |
+| 💎 | Polished gem | Swap this pack for an Epic or Legendary one (Rare if there's none). |
 
-**For the game.** In a duel, the drafter keeps these for their own turns as the guesser. In a one-deck run,
-treasures only hold draft power-ups, and the guesser starts with two random game power-ups instead.
+**For guessing** (gold icons). In a duel the drafter keeps these for their own turns as the guesser; with one
+deck they're the guesser's. On screen, click them during a guess. On paper, tick them off on the sheet and the
+presenter does what they say.
 
 | | Power-up | Effect |
 | --- | --- | --- |
 | 🎤 | Who sings? | Reveal the artist. |
 | 📅 | Calendar | Reveal the release year (or the peak year if unknown). |
+| 💿 | Liner notes | Reveal the album. |
 | 🔤 | Initials | Reveal the first letter of every title word, e.g. `T__ D____ o_ P____ o_ M___`. |
-| 🎵 | Hum it | Play 3 seconds of the song (from where the preview gets audible). |
+| 🎶 | Chorus | Reveal the chorus line (the most repeated one) for free. On screen, kept if the song has none. |
+| 🎵 | Hum it | Play 3 seconds of the song (from where the preview gets audible). On paper: the presenter hums it. |
+| ⚖️ | Fifty-fifty | Two titles, one of them right; picking the wrong one is a wrong guess. On screen the wrong one is another song in your decks, by the same band when there is one. |
 | 🛡️ | Shield | The next wrong guess costs nothing. |
+| 🩹 | Second chance | Take back one hint or wrong guess (a wrong guess first). The lines already shown stay. |
 | ✖️ | Double down | Before the first hint or wrong guess: the floor points ×2 if guessed with at most one; otherwise no floor points for this song. |
 | 🙅 | Veto | Send the song back: the presenter plays another one of the same floor from their deck instead (if none is left, this one is dropped). |
 
@@ -476,6 +513,8 @@ for those first, since the server shares one processor core between requests.
 | Pack sizes by rarity | `AR_PACK_SIZE` in `web/arena.js` | 3, 3, 4, 4 (Wildcard 5) |
 | How often each rarity of pack comes up | `AR_FAMILY_WEIGHT` | 1, 0.85, 0.6, 0.35 |
 | Event chances per pick | `AR_EVENT_CHANCE` | chest 3%, face-down card 3%, trader 2% |
+| Treasures per draft | `AR_TREASURES` | 4 (after each fifth) |
+| Blessings | `AR_BLESSINGS` | see [The draft](#the-draft) |
 | Songs per artist per deck | `AR_ARTIST_CAP` | 3 |
 | How likely songs the drafter knows less are, per floor | `AR_DRAFTER_KNOWS` | see [How packs are chosen](#how-packs-are-chosen-and-recency-bias) |
 | Binges that are legendary / epic / rare | `binge_level` in `arena_pool` | top 10 / next 20 / next 50 |

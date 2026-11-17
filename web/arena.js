@@ -23,7 +23,8 @@ const AR_RARITY = [
 const AR_PACK_SIZE = [3, 3, 4, 4];                 // songs in a pack, by the pack's rarity (Wildcard: 5)
 const AR_FAMILY_WEIGHT = [1, 0.85, 0.6, 0.35];     // how often a pack of each rarity comes up
 const AR_MAX_PENALTY = 6;                          // hints + wrong guesses before a song is lost
-const AR_EVENT_CHANCE = {chest: 0.03, mystery: 0.03, trader: 0.02};   // per pick, at most one per floor
+const AR_EVENT_CHANCE = {chest: 0.03, mystery: 0.03, trader: 0.02};   // per pick, at most one between two treasures
+const AR_TREASURES = 4;                            // treasure after each fifth of the draft (the last fifth has none)
 const AR_ARTIST_CAP = 3;                           // songs per artist in one deck
 // Every song is one you both played 3+ times (the server sees to that). On the easier floors the drafter, who
 // presents it and sings along, should know it well too: how likely a song is by the drafter's plays
@@ -32,32 +33,56 @@ const AR_DRAFTER_KNOWS = [[0.4, 0.8, 1], [0.6, 0.9, 1], [0.8, 1, 1], [1, 1, 1]];
 const arDrafterKnows = s => AR_DRAFTER_KNOWS[s.tier][s.p[0] >= 30 ? 2 : s.p[0] >= 10 ? 1 : 0];
 const AR_YEARLY = new Set(["year_g", "year_d", "release", "decade"]);
 
+// Power-ups go into your hand and are used when you click them. Draft ones act on the pack in front of you;
+// guessing ones are for the game, on paper or on screen (in a duel the drafter keeps them for their own turns
+// as guesser, with one deck they're for the guesser).
 const AR_POWERUPS = {
-  // used during the draft
-  refresh2: {emoji: "🔄", name: "Second wind", when: "draft", text: "+2 refreshes, right away."},
-  wide: {emoji: "🃏", name: "Wide pack", when: "draft", text: "Your next 3 packs show 5 songs."},
-  cherry: {emoji: "🍒", name: "Cherry-pick", when: "draft", text: "You choose the theme of your next pack, from three."},
-  timemachine: {emoji: "⏳", name: "Time machine", when: "draft", text: "Your next pack is from a release year you choose."},
-  twofer: {emoji: "👯", name: "Two for one", when: "draft", text: "Take two songs from your next pack."},
-  lucky: {emoji: "🍀", name: "Lucky charm", when: "draft", text: "Epic and legendary packs come up twice as often for the rest of this draft."},
-  mulligan: {emoji: "♻️", name: "Mulligan", when: "keep", text: "Keep it: swap out one song of your deck whenever you like during this draft."},
-  // kept for when you guess
-  artist: {emoji: "🎤", name: "Who sings?", when: "play", text: "When you’re guessing: reveal the artist."},
-  year: {emoji: "📅", name: "Calendar", when: "play", text: "When you’re guessing: reveal the release year."},
-  initials: {emoji: "🔤", name: "Initials", when: "play", text: "When you’re guessing: reveal the first letter of every word in the title."},
-  hum: {emoji: "🎵", name: "Hum it", when: "play", text: "When you’re guessing: hear 3 seconds of the song."},
-  shield: {emoji: "🛡️", name: "Shield", when: "play", text: "When you’re guessing: your next wrong guess costs nothing."},
+  // for the draft
+  refresh2: {emoji: "🔄", name: "Second wind", when: "draft", text: "+2 refreshes."},
+  wide: {emoji: "🃏", name: "Wide pack", when: "draft", text: "Two more songs in this pack (up to 5)."},
+  cherry: {emoji: "🍒", name: "Cherry-pick", when: "draft", text: "Swap this pack for a theme you choose, from three."},
+  timemachine: {emoji: "⏳", name: "Time machine", when: "draft", text: "Swap this pack for a release year you choose."},
+  twofer: {emoji: "👯", name: "Two for one", when: "draft", text: "Take two songs from this pack."},
+  lucky: {emoji: "🍀", name: "Lucky charm", when: "draft", text: "Epic and legendary packs come up twice as often for the rest of the draft."},
+  mulligan: {emoji: "♻️", name: "Mulligan", when: "draft", text: "Throw one song out of your deck and draft a new one for its floor."},
+  scout: {emoji: "🔭", name: "Spyglass", when: "draft", text: "See which floor this pack is for."},
+  compass: {emoji: "🧭", name: "Compass", when: "draft", text: "Choose the floor of this pick: the pack is swapped for one from that floor."},
+  gem: {emoji: "💎", name: "Polished gem", when: "draft", text: "Swap this pack for an Epic or Legendary one."},
+  // for guessing
+  artist: {emoji: "🎤", name: "Who sings?", when: "play", text: "Reveal the artist."},
+  year: {emoji: "📅", name: "Calendar", when: "play", text: "Reveal the release year."},
+  album: {emoji: "💿", name: "Liner notes", when: "play", text: "Reveal the album."},
+  initials: {emoji: "🔤", name: "Initials", when: "play", text: "Reveal the first letter of every word in the title."},
+  chorus: {emoji: "🎶", name: "Chorus", when: "play", text: "Hear the chorus line, for free."},
+  hum: {emoji: "🎵", name: "Hum it", when: "play", text: "3 seconds of the song (on paper: the presenter hums it)."},
+  fifty: {emoji: "⚖️", name: "Fifty-fifty", when: "play", text: "Two titles, one of them right. Picking the wrong one is a wrong guess."},
+  shield: {emoji: "🛡️", name: "Shield", when: "play", text: "The next wrong guess costs nothing."},
+  rewind: {emoji: "🩹", name: "Second chance", when: "play", text: "Take back one hint or wrong guess."},
   double: {emoji: "✖️", name: "Double down", when: "play", text: "Before the first hint: double the floor points if you get it with at most one hint or wrong guess, none at all if not."},
-  veto: {emoji: "🙅", name: "Veto", when: "play", text: "Send a song back: the presenter has to play another one of the same tier instead."},
+  veto: {emoji: "🙅", name: "Veto", when: "play", text: "Send a song back: the presenter has to play another one of the same floor instead."},
 };
-const AR_DRAFT_ITEMS = Object.keys(AR_POWERUPS).filter(k => AR_POWERUPS[k].when !== "play");
+const AR_DRAFT_ITEMS = Object.keys(AR_POWERUPS).filter(k => AR_POWERUPS[k].when === "draft");
 const AR_PLAY_ITEMS = Object.keys(AR_POWERUPS).filter(k => AR_POWERUPS[k].when === "play");
+
+// a blessing to start with, like Neow's in Slay the Spire: three to choose from, one with a price
+const AR_BLESSINGS = {
+  trove: {emoji: "🎁", name: "Treasure trove", text: "Choose a draft power-up and a guessing power-up, from three each."},
+  spare: {emoji: "🔄", name: "Spare refreshes", text: "+3 refreshes."},
+  legend: {emoji: "✨", name: "Legendary opener", text: "Your first pack is the rarest one there is."},
+  tricks: {emoji: "🧰", name: "Bag of tricks", text: "Two random draft power-ups."},
+  helpers: {emoji: "🤝", name: "Helping hand", text: "Two random guessing power-ups."},
+  sight: {emoji: "🔮", name: "Second sight", text: "Your first 10 packs show which floor they’re for."},
+  gamble: {emoji: "🎰", name: "Gambler’s bargain", cost: "Lose 2 refreshes", text: "Two random draft power-ups and two random guessing power-ups."},
+  born: {emoji: "🍀", name: "Born lucky", cost: "Lose 1 refresh", text: "Epic and legendary packs come up twice as often, all draft long."},
+  hoard: {emoji: "👑", name: "Dragon’s hoard", cost: "No refreshes at all", text: "Three treasure picks right now: a draft and a guessing power-up each time."},
+};
 
 let ar = null;                                     // the run (saved in the browser)
 const arPools = {};                                // "drafter-guesser-english" -> pool from /api/arena
 const arLyrics = {};                               // track key -> {text, lang, lines}
 const arSound = {audio: null, ctx: null, src: null};
 let arRulesOpen = false;
+let arMulliganMode = false;                        // the Mulligan was clicked: the deck shows ♻️ buttons
 
 // ------------------------------------------------------------- helpers --
 const arRand = arr => arr[Math.floor(Math.random() * arr.length)];
@@ -74,7 +99,25 @@ const arRar = r => AR_RARITY[r] || AR_RARITY[0];
 const arStars = n => "★".repeat(n) + "☆".repeat(3 - n);
 const arPU = id => AR_POWERUPS[id];
 function arSave() { try { localStorage.setItem(AR_KEY, JSON.stringify(ar)); } catch { /* no storage: the run lives in memory */ } }
-function arLoad() { try { return JSON.parse(localStorage.getItem(AR_KEY) || "null"); } catch { return null; } }
+function arLoad() { try { return arMigrate(JSON.parse(localStorage.getItem(AR_KEY) || "null")); } catch { return null; } }
+// runs saved before the floors were shuffled and power-ups went into the hand
+function arMigrate(r) {
+  (r?.drafts || []).forEach(d => {
+    if (!d.order) {
+      d.order = [];
+      for (let t = 0; t < 4; t++) {
+        const n = r.setup.perTier - d.picks.filter(p => p.tier === t).length - d.pending.filter(x => x === t).length;
+        for (let i = 0; i < n; i++) d.order.push(t);
+      }
+    }
+    d.hand ??= [...(d.keep || [])];
+    d.items ??= [];
+    d.treasures ??= (d.floorTreasure || []).filter(Boolean).length;
+    d.segEvent ??= -1;
+    if (d.event?.type === "treasure" && !d.event.draft) d.event = arTreasureEvent();
+  });
+  return r;
+}
 function arHof() { try { return JSON.parse(localStorage.getItem(AR_HOF) || "[]"); } catch { return []; } }
 const arBody = () => $("arena-body");
 const arDraft = () => ar?.drafts?.[ar.cur];
@@ -124,10 +167,11 @@ function arNewRun(f) {
     v: 1, phase: "handoff", cur: 0, created: Date.now(),
     setup: {a, b, mode: f.mode, perTier: +f.perTier, refreshes: +f.refreshes, english: f.english, sing: f.sing},
     drafts: pairs.map(([d, g]) => ({
-      drafter: d, guesser: g, picks: [], pending: [], refreshes: +f.refreshes, pack: null, event: null,
-      fx: {wide: 0, twofer: 0, cherry: false, time: false, lucky: false}, keep: [], items: [], offered: {},
-      recent: [], floorEvent: [false, false, false, false], floorTreasure: [false, false, false, false],
-      treasureDue: false, done: false,
+      drafter: d, guesser: g, picks: [], pending: [], refreshes: +f.refreshes, pack: null,
+      event: {type: "neow", options: arNeowOptions()},
+      order: arShuffledOrder(+f.perTier),          // the floor of every pick, shuffled and hidden
+      fx: {lucky: false, legend: false, scout: 0}, hand: [], items: [], offered: {},
+      recent: [], treasures: 0, segEvent: -1, treasureDue: false, done: false,
     })),
     play: null,
   };
@@ -148,7 +192,8 @@ function arSetupHTML() {
     <div class="ar-intro">
       <p><b>Guess the lyrics, drafted like an arena run.</b> Each of you builds a deck of songs for the other one:
         pick by pick you’re offered a themed pack of 3 to 5 songs and keep one. Four floors, from 🌱 Easy to 👹 Impossible,
-        tuned to how well the <i>guesser</i> knows each song. With every song you also choose the lyric line they’ll get.
+        tuned to how well the <i>guesser</i> knows each song, come in a hidden random order. Start with a blessing,
+        collect power-ups on the way. With every song you also choose the lyric line they’ll get.
         At the end you get a list to write on paper, or you play it on this screen: every extra line costs a star.</p>
       <p class="muted">Only songs with English lyrics, no instrumentals, and every year of your history is as likely as
         last month. Full rules: <button type="button" class="linkish" data-ar="rules">📜 Rules</button></p>
@@ -199,12 +244,14 @@ async function arRenderBlocked() {
 
 // --------------------------------------------------------------- draft --
 function arTierCount(dr, t) { return dr.picks.filter(p => p.tier === t).length; }
+// every floor still gets its share of songs, but in a random order you don't see: a pack's floor shows once
+// you've picked from it (or with the Spyglass)
+const arShuffledOrder = per => shuffle([0, 1, 2, 3].flatMap(t => Array(per).fill(t)));
 function arCurrentTier(dr) {
   if (dr.pending.length) return dr.pending[0];
-  for (let t = 0; t < 4; t++) if (arTierCount(dr, t) < ar.setup.perTier) return t;
-  return null;
+  return dr.order.length ? dr.order[0] : null;
 }
-const arIsBossPick = (dr, t) => t === 3 && !dr.pending.length && arTierCount(dr, 3) === ar.setup.perTier - 1;
+const arIsBossPick = dr => !dr.pending.length && dr.order.length === 1;   // the very last pick
 
 function arAvailable(dr, pool, tier) {
   const taken = new Set(dr.picks.map(p => p.k));
@@ -275,64 +322,83 @@ function arPickSongs(pool, v, size) {
 }
 
 function arMakePack(dr, pool, tier, f, v, opts = {}) {
-  let size = f.family === "wildcard" ? 5 : AR_PACK_SIZE[f.rar];
-  if (dr.fx.wide > 0) { size = 5; dr.fx.wide--; }
+  const size = f.family === "wildcard" ? 5 : AR_PACK_SIZE[f.rar];
   const songs = arPickSongs(pool, v, size);
   songs.forEach(i => { const k = pool.songs[i].k; dr.offered[k] = (dr.offered[k] || 0) + 1; });
   dr.recent = [f.family, ...dr.recent].slice(0, 3);
-  let take = 1;
-  if (dr.fx.twofer > 0 && songs.length >= 2 && !dr.pending.length && ar.setup.perTier - arTierCount(dr, tier) >= 2) {
-    take = 2; dr.fx.twofer--;
-  }
+  let scouted = !!opts.scouted;
+  if (dr.fx.scout > 0) { scouted = true; dr.fx.scout--; }   // Second sight
   return {id: Math.random().toString(36).slice(2, 10), family: f.family, cat: v.cat.id, name: v.cat.name, emoji: v.cat.emoji,
-          desc: v.cat.desc, rar: f.rar, songs: songs.map(i => pool.songs[i].k), size: songs.length, take, taken: 0, tier,
-          boss: !!opts.boss};
+          desc: v.cat.desc, rar: f.rar, songs: songs.map(i => pool.songs[i].k), size: songs.length, take: 1, taken: 0, tier,
+          boss: !!opts.boss, scouted};
 }
 
-function arBuildPack(dr, pool, tier) {
-  const boss = arIsBossPick(dr, tier);
-  let fams = dr.fx.wide > 0 ? arOptions(dr, pool, tier, 5) : [];     // a wide pack wants themes with five songs
-  if (!fams.length) fams = arOptions(dr, pool, tier);
+// opts.minRar: only packs of this rarity or better (Polished gem), falling back to anything rarer than common
+function arBuildPack(dr, pool, tier, opts = {}) {
+  const boss = arIsBossPick(dr);
+  let fams = arOptions(dr, pool, tier);
   if (boss) {
     const strong = fams.filter(f => f.rar >= 2);
     if (strong.length) fams = strong;              // the boss pack is epic or legendary when it can be
   }
+  if (dr.fx.legend && fams.length) {               // Legendary opener: the rarest pack there is
+    dr.fx.legend = false;
+    const top = Math.max(...fams.map(f => f.rar));
+    fams = fams.filter(f => f.rar === top);
+  }
+  if (opts.minRar) {
+    const strong = fams.filter(f => f.rar >= opts.minRar), better = fams.filter(f => f.rar >= 1);
+    fams = strong.length ? strong : better.length ? better : fams;
+  }
   if (!fams.length) fams = arOptions(dr, pool, tier, 1);
   if (!fams.length) return null;
-  if (dr.fx.cherry && fams.length > 1) {           // power-up: you choose the theme
-    dr.fx.cherry = false;
-    const choice = [];
-    const left = fams.slice();
-    while (choice.length < 3 && left.length) {
-      const f = arWeighted(left, x => arFamilyWeight(dr, x) + 0.05);
-      choice.push(f.family);
-      left.splice(left.indexOf(f), 1);
-    }
-    dr.event = {type: "cherry", options: choice, tier, boss};
-    return null;
-  }
-  if (dr.fx.time) {                                 // power-up: you choose the year
-    const rel = fams.find(f => f.family === "release");
-    if (rel) {
-      dr.fx.time = false;
-      dr.event = {type: "time", years: rel.variants.map(v => v.cat.year).sort((a, b) => a - b), tier, boss};
-      return null;
-    }
-  }
   // themes made mostly of songs the guesser plays lately, or that the drafter knows less, come up less
   const f = arWeighted(fams, x => {
     const songs = x.variants.flatMap(v => v.songs);
     return arFamilyWeight(dr, x) * (0.3 + 0.7 * arOldShare(pool, songs)) * arFit(pool, x.family, songs);
   });
-  return arMakePack(dr, pool, tier, f, arPickVariant(f, pool), {boss});
+  return arMakePack(dr, pool, tier, f, arPickVariant(f, pool), {boss, scouted: opts.scouted});
 }
 
-function arPackFrom(dr, pool, tier, family, year) {
+function arPackFrom(dr, pool, tier, family, year, scouted = false) {
   const fams = arOptions(dr, pool, tier);
   const f = fams.find(x => x.family === family) || fams[0];
   if (!f) return null;
   const v = year != null ? (f.variants.find(x => x.cat.year === year) || arPickVariant(f, pool)) : arPickVariant(f, pool);
-  return arMakePack(dr, pool, tier, f, v, {boss: arIsBossPick(dr, tier)});
+  return arMakePack(dr, pool, tier, f, v, {boss: arIsBossPick(dr), scouted});
+}
+
+// more songs for a pack: from its theme, or anything on its floor
+function arFillPack(dr, pool, pk, size) {
+  const ok = arAvailable(dr, pool, pk.tier), c = pool.cat.get(pk.cat);
+  const have = new Set(pk.songs), want = Math.max(0, size - pk.songs.length);
+  const extra = (c ? c.songs : []).filter(j => ok(j) && !have.has(pool.songs[j].k));
+  const fill = extra.length >= want ? extra : pool.songs.map((_, j) => j).filter(j => ok(j) && !have.has(pool.songs[j].k));
+  shuffle(fill).slice(0, want).forEach(j => {
+    pk.songs.push(pool.songs[j].k);
+    dr.offered[pool.songs[j].k] = (dr.offered[pool.songs[j].k] || 0) + 1;
+  });
+  pk.size = pk.songs.length;
+}
+
+function arCherryEvent(dr, pool, tier, boss) {
+  const left = arOptions(dr, pool, tier), choice = [];
+  while (choice.length < 3 && left.length) {
+    const f = arWeighted(left, x => arFamilyWeight(dr, x) + 0.05);
+    choice.push(f.family);
+    left.splice(left.indexOf(f), 1);
+  }
+  return {type: "cherry", options: choice, tier, boss};
+}
+
+function arTreasureEvent(extra = {}) {
+  return {type: "treasure", draft: shuffle(AR_DRAFT_ITEMS.slice()).slice(0, 3), guess: shuffle(AR_PLAY_ITEMS.slice()).slice(0, 3),
+          sel: {}, ...extra};
+}
+function arNeowOptions() {
+  const ids = Object.keys(AR_BLESSINGS);
+  const free = shuffle(ids.filter(i => !AR_BLESSINGS[i].cost)).slice(0, 2), costly = arRand(ids.filter(i => AR_BLESSINGS[i].cost));
+  return shuffle([...free, costly]);
 }
 
 // what comes next in a draft: a treasure, an event, a pack, or the end
@@ -342,20 +408,16 @@ function arNext(dr) {
   const tier = arCurrentTier(dr);
   if (dr.treasureDue) {
     dr.treasureDue = false;
-    const forPlay = ar.setup.mode === "duel";
-    const final = tier === null;
-    const ids = [...(final ? [] : AR_DRAFT_ITEMS), ...(forPlay ? AR_PLAY_ITEMS : [])];
-    if (ids.length) {
-      dr.event = {type: "treasure", options: shuffle(ids.slice()).slice(0, 3), final};
-      return;
-    }
+    dr.event = arTreasureEvent();
+    return;
   }
-  if (tier === null) { dr.done = true; return; }
+  if (tier === null) { dr.done = true; arMulliganMode = false; return; }
   dr.pack = arBuildPack(dr, pool, tier);
   if (!dr.pack && !dr.event) {                     // nothing left for this floor: skip its remaining picks
     toast(`No more songs for the ${arTier(tier).name} floor: moving on.`);
     while (arTierCount(dr, tier) < ar.setup.perTier) dr.picks.push({k: "", skipped: true, tier, t: "(no song left)", a: "", rar: 0});
-    if (dr.pending[0] === tier) dr.pending.shift();
+    dr.order = dr.order.filter(x => x !== tier);
+    dr.pending = dr.pending.filter(x => x !== tier);
     arNext(dr);
   }
 }
@@ -375,6 +437,7 @@ function arTakeSong(dr, key, how = {}) {
   dr.picks.push(p);
   const pended = !!dr.pending.length && dr.pending[0] === tier;
   if (pended) dr.pending.shift();
+  else if (dr.order.includes(tier)) dr.order.splice(dr.order.indexOf(tier), 1);
   // next: the drafter chooses the lines the guesser gets (arLyricHTML); the draft goes on after that
   dr.lyric = {k: p.k, tier, start: null, count: arTier(tier).start, pended};
   return p;
@@ -390,49 +453,103 @@ const arLangName = l => ({de: "German", fi: "Finnish", sv: "Swedish", no: "Norwe
   es: "Spanish", fr: "French", it: "Italian", pt: "Portuguese", cs: "Czech", hu: "Hungarian", mixed: "a mix of languages",
   other: "another language"})[l] || l;
 
-function arAfterPick(dr, tier) {
+function arAfterPick(dr, tier, pended = false) {
   const pack = dr.pack;
   if (pack) {
     pack.taken++;
-    if (pack.taken < pack.take && arTierCount(dr, tier) < ar.setup.perTier) return;   // Two for one: pick again
+    if (pack.taken < pack.take && dr.order.includes(tier)) return;   // Two for one: pick again
     dr.pack = null;
   }
-  const floorDone = arTierCount(dr, tier) >= ar.setup.perTier && !dr.pending.length;
-  if (floorDone && !dr.floorTreasure[tier]) {
-    dr.floorTreasure[tier] = true;
-    dr.treasureDue = true;
-  } else if (!dr.pending.length && !dr.floorEvent[tier]) {
-    const r = Math.random();
-    const c = AR_EVENT_CHANCE;
-    if (r < c.chest) {
-      dr.floorEvent[tier] = true;
+  if (!pended) {                                   // a treasure after every fifth of the draft
+    const all = ar.setup.perTier * 4, done = all - dr.order.length;
+    if (dr.treasures < AR_TREASURES && done >= Math.round(all * (dr.treasures + 1) / 5)) {
+      dr.treasures++;
       dr.treasureDue = true;
+    }
+  }
+  if (!dr.treasureDue && !dr.pending.length && dr.order.length && dr.segEvent !== dr.treasures) {
+    const r = Math.random(), c = AR_EVENT_CHANCE, next = arCurrentTier(dr);
+    if (r < c.chest) {
+      dr.segEvent = dr.treasures;
+      dr.event = arTreasureEvent({chest: true});
     } else if (r < c.chest + c.mystery) {
-      const pool = arPoolNow(dr), ok = arAvailable(dr, pool, tier);
+      const pool = arPoolNow(dr), ok = arAvailable(dr, pool, next);
       const rare = pool.songs.map((s, i) => i).filter(i => ok(i) && pool.songs[i].rar >= 1);
       if (rare.length) {
-        dr.floorEvent[tier] = true;
-        dr.event = {type: "mystery", key: pool.songs[arRand(rare)].k, tier};
+        dr.segEvent = dr.treasures;
+        dr.event = {type: "mystery", key: pool.songs[arRand(rare)].k, tier: next};
       }
     } else if (r < c.chest + c.mystery + c.trader && dr.refreshes > 0) {
-      dr.floorEvent[tier] = true;
-      const ids = ar.setup.mode === "duel" ? [...AR_DRAFT_ITEMS, ...AR_PLAY_ITEMS] : AR_DRAFT_ITEMS;
-      dr.event = {type: "trader", item: arRand(ids)};
+      dr.segEvent = dr.treasures;
+      dr.event = {type: "trader", item: arRand([...AR_DRAFT_ITEMS, ...AR_PLAY_ITEMS])};
     }
   }
   arNext(dr);
 }
 
-function arUsePowerup(dr, id) {
-  const fx = dr.fx;
+// a power-up goes into the hand: draft ones to use in this draft, guessing ones for the game
+function arGain(dr, id) { (arPU(id).when === "play" ? dr.items : dr.hand).push(id); }
+
+function arBless(dr, id) {
+  const some = (list, n) => shuffle(list.slice()).slice(0, n);
+  dr.event = null;
+  if (id === "trove") dr.event = arTreasureEvent({title: "🎁 Treasure trove"});
+  else if (id === "spare") dr.refreshes += 3;
+  else if (id === "legend") dr.fx.legend = true;
+  else if (id === "tricks") some(AR_DRAFT_ITEMS, 2).forEach(x => arGain(dr, x));
+  else if (id === "helpers") some(AR_PLAY_ITEMS, 2).forEach(x => arGain(dr, x));
+  else if (id === "sight") dr.fx.scout = 10;
+  else if (id === "gamble") {
+    dr.refreshes = Math.max(0, dr.refreshes - 2);
+    some(AR_DRAFT_ITEMS, 2).forEach(x => arGain(dr, x));
+    some(AR_PLAY_ITEMS, 2).forEach(x => arGain(dr, x));
+  } else if (id === "born") { dr.refreshes = Math.max(0, dr.refreshes - 1); dr.fx.lucky = true; }
+  else if (id === "hoard") { dr.refreshes = 0; dr.hoard = 2; dr.event = arTreasureEvent({title: "👑 Dragon’s hoard (1 of 3)"}); }
+}
+
+// can this draft power-up be used right now? (the ones that change the pack need a fresh one in front of you)
+function arCanUse(dr, id) {
+  if (dr.lyric || dr.event || dr.done) return false;
+  const pk = dr.pack, fresh = !!pk && !pk.taken, pool = arPoolNow(dr);
+  const opts = () => (pool ? arOptions(dr, pool, pk.tier) : []);
+  switch (id) {
+    case "refresh2": return true;
+    case "lucky": return !dr.fx.lucky;
+    case "mulligan": return dr.picks.some(p => !p.skipped);
+    case "scout": return !!pk && !pk.scouted;
+    case "wide": return fresh && pk.songs.length < 5;
+    case "twofer": return fresh && pk.take === 1 && !dr.pending.length && dr.order.length > 2   // the boss pick stays a pick of its own
+      && dr.order.filter(t => t === pk.tier).length >= 2;
+    case "cherry": return fresh && opts().length > 1;
+    case "timemachine": return fresh && opts().some(f => f.family === "release");
+    case "compass": return fresh && !dr.pending.length && new Set(dr.order).size > 1;
+    case "gem": return fresh && opts().some(f => f.rar >= 2);
+  }
+  return false;
+}
+
+function arUseDraftPU(dr, pool, n) {
+  const id = dr.hand[n];
+  if (!id || !arCanUse(dr, id)) return;
+  if (id === "mulligan") { arMulliganMode = !arMulliganMode; return; }   // used up once a song is swapped
+  const pk = dr.pack;
+  dr.hand.splice(n, 1);
   if (id === "refresh2") dr.refreshes += 2;
-  else if (id === "wide") fx.wide += 3;
-  else if (id === "cherry") fx.cherry = true;
-  else if (id === "timemachine") fx.time = true;
-  else if (id === "twofer") fx.twofer += 1;
-  else if (id === "lucky") fx.lucky = true;
-  else if (id === "mulligan") dr.keep.push(id);
-  else dr.items.push(id);                          // play power-ups: kept for your turns as guesser
+  else if (id === "lucky") dr.fx.lucky = true;
+  else if (id === "scout") pk.scouted = true;
+  else if (id === "twofer") pk.take = 2;
+  else if (id === "wide") arFillPack(dr, pool, pk, 5);
+  else if (id === "cherry") { dr.pack = null; dr.event = arCherryEvent(dr, pool, pk.tier, pk.boss); }
+  else if (id === "timemachine") {
+    const rel = arOptions(dr, pool, pk.tier).find(f => f.family === "release");
+    dr.pack = null;
+    dr.event = {type: "time", years: rel.variants.map(v => v.cat.year).sort((a, b) => a - b), tier: pk.tier, boss: pk.boss};
+  } else if (id === "compass") { dr.pack = null; dr.event = {type: "compass", tiers: [...new Set(dr.order)].sort()}; }
+  else if (id === "gem") {
+    const np = arBuildPack(dr, pool, pk.tier, {minRar: 2, scouted: pk.scouted});
+    if (np) { np.boss = pk.boss; dr.pack = np; }
+  }
+  arPlay(id === "gem" ? "epic" : "pick");
 }
 
 // ----------------------------------------------------------- draft UI --
@@ -476,17 +593,17 @@ function arSongCard(pool, key, pack, opts = {}) {
 }
 
 function arFloorsHTML(dr) {
-  const per = ar.setup.perTier, cur = arCurrentTier(dr);
+  const per = ar.setup.perTier;
   return `<div class="ar-floors">${AR_TIERS.map((t, i) => {
     const n = arTierCount(dr, i);
-    return `<div class="ar-floor${i === cur ? " now" : ""}${n >= per ? " done" : ""}"><span>${t.emoji} ${t.name}</span>
+    return `<div class="ar-floor${n >= per ? " done" : ""}"><span>${t.emoji} ${t.name}</span>
       <b>${n}/${per}</b><i style="width:${(n / per * 100).toFixed(0)}%"></i></div>`;
   }).join("")}</div>`;
 }
 
 function arDeckHTML(dr) {
   const per = ar.setup.perTier;
-  const canSwap = dr.keep.includes("mulligan");
+  const canSwap = arMulliganMode && dr.hand.includes("mulligan") && !dr.lyric;
   return `<aside class="ar-deck"><h3>Deck <span class="muted">${dr.picks.filter(p => !p.skipped).length}/${per * 4}</span></h3>
     ${AR_TIERS.map((t, ti) => {
       const picks = dr.picks.filter(p => p.tier === ti);
@@ -497,21 +614,37 @@ function arDeckHTML(dr) {
           ${p.bad ? `<small class="ar-bad">⚠️ ${esc(p.bad)} <button type="button" class="linkish" data-ar="swap-free" data-k="${esc(p.k)}">swap it (free)</button></small>` : ""}</span>
           ${canSwap && !p.bad ? `<button type="button" class="linkish" data-ar="mulligan" data-k="${esc(p.k)}" title="Use your Mulligan on this song">♻️</button>` : ""}</li>`).join("")}</ol>`;
     }).join("")}
-    ${dr.items.length || dr.keep.length ? `<h3>Power-ups</h3><ul class="ar-items">${[...dr.keep, ...dr.items].map(id =>
-      `<li title="${esc(arPU(id).text)}">${arPU(id).emoji} ${esc(arPU(id).name)} <small class="muted">${arPU(id).when === "play" ? "for when you guess" : "this draft"}</small></li>`).join("")}</ul>` : ""}
   </aside>`;
 }
 
 function arStatusHTML(dr) {
-  const fx = dr.fx, on = [];
-  if (fx.wide) on.push(`🃏 next ${fx.wide} pack${fx.wide > 1 ? "s" : ""}: 5 songs`);
-  if (fx.twofer) on.push("👯 take two from the next pack");
-  if (fx.cherry) on.push("🍒 you choose the next theme");
-  if (fx.time) on.push("⏳ you choose the next year");
-  if (fx.lucky) on.push("🍀 lucky charm");
+  const fx = dr.fx, on = [], all = ar.setup.perTier * 4;
+  if (fx.lucky) on.push("🍀 lucky");
+  if (fx.scout) on.push(`🔮 next ${fx.scout} pack${fx.scout > 1 ? "s" : ""} show their floor`);
+  if (fx.legend) on.push("✨ next pack: the rarest");
+  const next = Math.round(all * (dr.treasures + 1) / 5) - (all - dr.order.length);
   return `<div class="ar-status"><span class="ar-who">${arName(dr.drafter)} drafts for ${arName(dr.guesser)}</span>
+    <span class="ar-pickno" title="The floors come in a random order: you see a song's floor once it's in your deck">🎲 pick ${Math.min(all, all - dr.order.length + 1)} of ${all}</span>
     <span class="ar-refresh" title="Refreshes: swap the whole pack for a new one">🔄 ${dr.refreshes}</span>
+    ${dr.treasures < AR_TREASURES && next > 0 ? `<span class="ar-fx" title="A treasure comes after every fifth of the draft">🎁 in ${plural(next, "pick")}</span>` : ""}
     ${on.map(x => `<span class="ar-fx">${esc(x)}</span>`).join("")}</div>`;
+}
+
+// your power-ups as little icons: click a draft one to use it; the guessing ones wait for the game
+function arHandHTML(dr) {
+  const icon = (id, attrs, cls) => `<${attrs ? "button type=\"button\"" : "span"} class="ar-icon ${cls}" ${attrs || ""}
+      title="${esc(arPU(id).name)}: ${esc(arPU(id).text)}${cls.includes("guess") ? ` (for guessing)` : ""}"><span class="ar-icon-e">${arPU(id).emoji}</span>
+      <small>${esc(arPU(id).name)}</small></${attrs ? "button" : "span"}>`;
+  const draft = dr.hand.map((id, n) => icon(id, `data-ar="pu" data-n="${n}" ${arCanUse(dr, id) ? "" : "disabled"}`,
+    `draft${id === "mulligan" && arMulliganMode ? " on" : ""}`)).join("");
+  const guess = dr.items.map(id => icon(id, "", "guess")).join("");
+  const who = ar.setup.mode === "duel" ? "you" : arName(dr.guesser);
+  return `<div class="ar-handbar">
+    ${draft ? `<div class="ar-hand-group"><span class="ar-hand-label">For the draft <small>· click to use</small></span><div class="ar-icons">${draft}</div></div>` : ""}
+    ${guess ? `<div class="ar-hand-group"><span class="ar-hand-label">For guessing <small>· when ${who} guess${who === "you" ? "" : "es"}</small></span><div class="ar-icons">${guess}</div></div>` : ""}
+    ${!draft && !guess ? `<span class="muted ar-hand-empty">🎒 No power-ups yet: a treasure comes after every fifth of the draft.</span>` : ""}
+    ${arMulliganMode && dr.hand.includes("mulligan") ? `<span class="ar-pending">♻️ Choose a song in your deck to throw out, or click the Mulligan again to keep it.</span>` : ""}
+  </div>`;
 }
 
 function arDraftHTML(dr, pool) {
@@ -519,15 +652,32 @@ function arDraftHTML(dr, pool) {
   const ev = dr.event;
   if (dr.lyric) {
     main = arLyricHTML(dr);
+  } else if (ev?.type === "neow") {
+    main = `<div class="ar-event neow"><p class="ar-big">🌅</p><p class="ar-event-title">A blessing for the road</p>
+      <p class="muted">Before the first pack, choose one.</p>
+      <div class="ar-loot">${ev.options.map((id, n) => {
+        const b = AR_BLESSINGS[id];
+        return `<button type="button" class="ar-pu${b.cost ? " costly" : ""}" data-ar="bless" data-id="${id}" style="--i:${n}">
+          <span class="ar-pu-emoji">${b.emoji}</span><b>${esc(b.name)}</b>${b.cost ? `<em>${esc(b.cost)}</em>` : ""}<small>${esc(b.text)}</small></button>`;
+      }).join("")}</div></div>`;
   } else if (ev?.type === "treasure") {
-    main = `<div class="ar-event treasure"><p class="ar-event-title">${ev.final ? "🏁 Final treasure" : "🎁 Treasure!"}</p>
-      <p class="muted">Pick one power-up.${ev.final ? " The draft is over, so only ones for the guessing game." : ""}</p>
-      <div class="ar-loot">${ev.options.map((id, n) => `<button type="button" class="ar-pu" data-ar="loot" data-id="${id}" style="--i:${n}">
-        <span class="ar-pu-emoji">${arPU(id).emoji}</span><b>${esc(arPU(id).name)}</b><small>${esc(arPU(id).text)}</small>
-        <i>${arPU(id).when === "play" ? "for when you guess" : arPU(id).when === "keep" ? "keep for this draft" : "used now"}</i></button>`).join("")}</div></div>`;
+    const who = ar.setup.mode === "duel" ? `for your own turns as guesser` : `for ${arName(dr.guesser)}`;
+    const row = (ids, kind) => `<div class="ar-loot">${ids.map((id, n) => `<button type="button" class="ar-pu${ev.sel[kind] === id ? " sel" : ""}"
+        data-ar="loot" data-row="${kind}" data-id="${id}" style="--i:${n + (kind === "g" ? 3 : 0)}">
+        <span class="ar-pu-emoji">${arPU(id).emoji}</span><b>${esc(arPU(id).name)}</b><small>${esc(arPU(id).text)}</small></button>`).join("")}</div>`;
+    main = `<div class="ar-event treasure"><p class="ar-event-title">${esc(ev.title || (ev.chest ? "🧰 A chest on the way!" : "🎁 Treasure!"))}</p>
+      <p class="muted">Take one of each. They go into your hand: click them when you need them.</p>
+      <p class="ar-loot-h">🃏 For the draft</p>${row(ev.draft, "d")}
+      <p class="ar-loot-h">🎯 For guessing <small class="muted">(${who}, on paper or on screen)</small></p>${row(ev.guess, "g")}
+      <div class="g-actions"><button type="button" data-ar="loot-take" ${ev.sel.d && ev.sel.g ? "" : "disabled"}>Take them</button></div></div>`;
+  } else if (ev?.type === "compass") {
+    main = `<div class="ar-event"><p class="ar-event-title">🧭 Compass: which floor is this pick for?</p>
+      <div class="ar-loot">${ev.tiers.map(t => `<button type="button" class="ar-pu" data-ar="compass" data-t="${t}">
+        <span class="ar-pu-emoji">${arTier(t).emoji}</span><b>${arTier(t).name}</b>
+        <small>${plural(dr.order.filter(x => x === t).length, "pick")} left</small></button>`).join("")}</div></div>`;
   } else if (ev?.type === "mystery") {
     main = `<div class="ar-event mystery"><p class="ar-event-title">🎴 A face-down card</p>
-      <p>A ${esc(arTier(ev.tier).name)} song, <b>Rare or better</b>, but you won’t see it until it’s in your deck.</p>
+      <p>A song, <b>Rare or better</b>, but you won’t see it (or its floor) until it’s in your deck.</p>
       <div class="ar-facedown">?</div>
       <div class="g-actions"><button type="button" data-ar="mystery-take">Take it blind</button>
         <button type="button" class="ghost" data-ar="mystery-skip">No thanks: show me a normal pack</button></div></div>`;
@@ -553,8 +703,9 @@ function arDraftHTML(dr, pool) {
     const animate = !arCalm();
     main = `${pending}<div class="ar-theme rar-${r.id}${pk.boss ? " boss" : ""}${animate && !arFx.packs.has(pk.id) ? " fx-in" : ""}">
         <span class="ar-theme-emoji">${pk.emoji}</span>
-        <div><p class="ar-theme-name">${pk.boss ? "👑 Boss pack · " : ""}${esc(pk.name)}</p><p class="muted">${esc(pk.desc)}${pk.boss ? " The song you pick here is worth double." : ""}</p></div>
-        <span class="ar-theme-rar">${r.name} pack${pk.take > 1 ? ` · take ${pk.take - pk.taken}` : ""}</span>
+        <div><p class="ar-theme-name">${pk.boss ? "👑 Boss pack · " : ""}${esc(pk.name)}</p><p class="muted">${esc(pk.desc)}${pk.boss ? " The last pick: the song you pick here is worth double." : ""}</p></div>
+        <span class="ar-theme-rar">${r.name} pack${pk.take > 1 ? ` · take ${pk.take - pk.taken}` : ""}
+          ${pk.scouted ? `<i class="ar-theme-floor">${arTier(pk.tier).emoji} ${arTier(pk.tier).name} floor</i>` : `<i class="ar-theme-floor muted">🎲 floor hidden</i>`}</span>
       </div>
       <div class="ar-pack">${pk.songs.map((k, n) => {
         const picked = dr.picks.some(p => p.k === k);
@@ -564,7 +715,7 @@ function arDraftHTML(dr, pool) {
         <button type="button" class="ghost" data-ar="refresh" ${dr.refreshes > 0 && !pk.taken ? "" : "disabled"}>🔄 Refresh this pack (${dr.refreshes} left)</button>
       </div>`;
   }
-  return `${arStatusHTML(dr)}${arFloorsHTML(dr)}<div class="ar-draft"><div class="ar-main">${main}</div>${arDeckHTML(dr)}</div>`;
+  return `${arStatusHTML(dr)}${arFloorsHTML(dr)}${arHandHTML(dr)}<div class="ar-draft"><div class="ar-main">${main}</div>${arDeckHTML(dr)}</div>`;
 }
 const arFamilyDesc = (fid, c) => ({release: "Songs released in one year (picked at random, older ones more often).",
   decade: "Songs released in one decade.", year_g: "The songs someone played most in one past year.",
@@ -579,7 +730,7 @@ function arDoneHTML(dr) {
   const counts = AR_RARITY.map((r, i) => [r, dr.picks.filter(p => p.rar === i && !p.skipped).length]);
   return `<div class="ar-event ar-done"><p class="ar-event-title">✅ ${arName(dr.drafter)}’s deck is ready</p>
     <p>${counts.filter(([, n]) => n).map(([r, n], i) => `<span class="ar-pill rar-${r.id}" style="--i:${i}">${n} ${r.name}</span>`).join(" ")}
-      ${dr.items.length ? `· power-ups for guessing: ${dr.items.map(id => arPU(id).emoji).join(" ")}` : ""}</p>
+      ${dr.items.length ? `· power-ups for guessing${ar.setup.mode === "duel" ? "" : ` (${arName(dr.guesser)}’s)`}: ${dr.items.map(id => arPU(id).emoji).join(" ")}` : ""}</p>
     <p class="muted">Your lyric sheet is below: write it on paper now if you like (it’s also on the last screen).
       ${next ? `Then ${arName(next.drafter)} drafts a deck for ${arName(next.guesser)}. ${arName(dr.drafter)}: tap the button first, then pass the device.` : ""}</p>
     <div class="g-actions"><button type="button" data-ar="${next ? "next-draft" : "sheets"}">${next ? `Hand over to ${arName(next.drafter)}` : "📝 Finish the draft"}</button></div></div>
@@ -598,9 +749,10 @@ function arLyricHTML(dr) {
   return `<div class="ar-present ar-lyric-step">
     <div class="ar-present-song rar-${r.id}">${cover(p.k)}<div><p class="ar-card-title">${esc(p.t)}</p>
       <p class="muted">${esc(p.a)}${p.y ? ` · ${p.y}` : ""}</p>
-      <p><span class="ar-pill rar-${r.id}">${r.name}</span> <span class="muted">${t.emoji} ${t.name}${p.boss ? " · 👑 boss song" : ""}</span></p>
-      ${p.story ? `<p class="ar-card-story">${esc(p.story)}</p>` : ""}</div></div>
-    <div class="ar-present-help"><p><b>✍️ Choose the lyric ${arName(dr.guesser)} gets.</b> Tap the first line. ${esc(arLineRule(p.tier))}</p>
+      <p><span class="ar-pill rar-${r.id}">${r.name}</span>${p.boss ? ` <span class="muted">👑 boss song</span>` : ""}</p>
+      ${p.story ? `<p class="ar-card-story">${esc(p.story)}</p>` : ""}</div>
+      <p class="ar-floor-reveal tier-${t.id}" title="${t.points} point${t.points > 1 ? "s" : ""} per star"><span>${t.emoji}</span>${t.name}</p></div>
+    <div class="ar-present-help"><p><b>It’s ${t.id === "easy" || t.id === "impossible" ? "an" : "a"} ${t.name} song. ✍️ Choose the lyric ${arName(dr.guesser)} gets.</b> Tap the first line. ${esc(arLineRule(p.tier))}</p>
       <div class="g-actions"><button type="button" class="ghost" data-ar="lyric-random" ${lines.length ? "" : "disabled"}>🎲 Random line</button>
         <span class="ar-count">Give <button type="button" class="ghost" data-ar="lyric-count-" ${n > 1 ? "" : "disabled"}>−</button>
         <b>${n}</b> line${n > 1 ? "s" : ""} <button type="button" class="ghost" data-ar="lyric-count+" ${n < 4 ? "" : "disabled"}>+</button></span></div>
@@ -629,7 +781,7 @@ function arKeepLyric(dr) {
   } else p.line = {start: null, count: 0, lines: [], hints: []};
   dr.lyric = null;
   arFx.justPicked = p.k;
-  arAfterPick(dr, lp.tier);
+  arAfterPick(dr, lp.tier, lp.pended);
 }
 
 // changed your mind: the song goes back (into the pack, if it came from one)
@@ -639,6 +791,7 @@ function arUndoLyric(dr) {
   const n = dr.picks.findIndex(x => x.k === lp.k);
   if (n >= 0) dr.picks.splice(n, 1);
   if (lp.pended) dr.pending.unshift(lp.tier);
+  else dr.order.unshift(lp.tier);
   if (!dr.pack) arNext(dr);
 }
 
@@ -646,7 +799,7 @@ function arUndoLyric(dr) {
 // one deck as a list to copy onto paper: the lines, the hints, and the answer with what it's worth
 function arSheetHTML(di) {
   const dr = ar.drafts[di];
-  const items = ar.drafts.filter(d => d.drafter === dr.guesser).flatMap(d => d.items);
+  const items = arGuessItems(dr.guesser);
   let n = 0;
   return `<div class="ar-sheet"><h3>📝 ${arName(dr.drafter)}’s lyrics for ${arName(dr.guesser)}</h3>
     ${AR_TIERS.map((t, ti) => {
@@ -666,7 +819,8 @@ function arSheetHTML(di) {
           </li>`;
         }).join("")}</ol>`;
     }).join("")}
-    ${items.length ? `<p class="muted">${arName(dr.guesser)}’s power-ups for guessing: ${items.map(id => `${arPU(id).emoji} ${esc(arPU(id).name)}`).join(", ")}</p>` : ""}
+    ${items.length ? `<h4>🎯 ${arName(dr.guesser)}’s power-ups for guessing <span class="muted">· tick them off when used</span></h4>
+      <ul class="ar-sheet-pu">${items.map(id => `<li><span>☐</span> ${arPU(id).emoji} <b>${esc(arPU(id).name)}</b> <span class="muted">${esc(arPU(id).text)}</span></li>`).join("")}</ul>` : ""}
     <div class="g-actions"><button type="button" class="ghost" data-ar="sheet-copy" data-di="${di}">📋 Copy as text</button>
       <button type="button" class="ghost" data-ar="sheet-print" data-di="${di}">🖨️ Print</button></div></div>`;
 }
@@ -685,6 +839,8 @@ function arSheetText(di) {
       out.push(`   Answer: ${p.t} – ${p.a}${p.y ? ` (${p.y})` : ""} · ${r.name}${r.bonus ? ` +${r.bonus}` : ""}${p.boss ? " · boss ×2" : ""}`);
     });
   });
+  const items = arGuessItems(dr.guesser);
+  if (items.length) out.push("", `${pname(dr.guesser).toUpperCase()}’S POWER-UPS FOR GUESSING`, ...items.map(id => `[ ] ${arPU(id).emoji} ${arPU(id).name}: ${arPU(id).text}`));
   return out.join("\n");
 }
 
@@ -709,10 +865,16 @@ function arPrintSheet(di) {
     body{font:15px/1.4 system-ui,sans-serif;margin:24px;color:#000;background:#fff}h3{margin:0 0 8px}h4{margin:18px 0 6px}
     ol{padding-left:28px}li{margin:0 0 12px;break-inside:avoid}.ar-sheet-lyric p{margin:0;font-weight:700;font-size:17px}
     .ar-sheet-hints,.ar-sheet-answer{margin:2px 0;font-size:13px;color:#444}.muted{color:#666}.ar-pill{border:1px solid #999;border-radius:9px;padding:0 6px;font-size:11px}
-    .ar-bad{color:#a00}</style></head><body>${body}</body></html>`);
+    .ar-bad{color:#a00}.ar-sheet-pu{list-style:none;padding:0}</style></head><body>${body}</body></html>`);
   w.document.close();
   w.focus();
   setTimeout(() => w.print(), 200);
+}
+
+// whose guessing power-ups are whose: in a duel each drafter keeps theirs for their own turns as guesser,
+// with one deck the drafter collects them for the guesser
+function arGuessItems(pid) {
+  return ar.drafts.filter(d => (ar.setup.mode === "duel" ? d.drafter : d.guesser) === pid).flatMap(d => d.items);
 }
 
 // the end of the draft: every deck's sheet (each behind a "look away"), and the on-screen game if you want it
@@ -749,11 +911,7 @@ function arStartPlay() {
     }
   }
   const items = {};
-  ar.drafts.forEach(d => { items[d.drafter] = (items[d.drafter] || []).concat(d.items); });
-  if (ar.setup.mode !== "duel") {                  // one deck: the guesser gets two random helpers
-    const g = ar.drafts[0].guesser;
-    items[g] = (items[g] || []).concat(shuffle(AR_PLAY_ITEMS.filter(x => x !== "veto")).slice(0, 2));
-  }
+  [ar.setup.a, ar.setup.b].forEach(p => { items[p] = arGuessItems(p).slice(); });
   const scores = {};
   [ar.setup.a, ar.setup.b].forEach(p => { scores[p] = 0; });
   ar.play = {queue, turn: 0, scores, items, results: [], cur: null};
@@ -899,6 +1057,9 @@ function arPlayHTML() {
     if (c.shown_info.artist) info.push(`🎤 ${esc(pick.a)}`);
     if (c.shown_info.year) info.push(`📅 ${pick.y || (pick.era ? `peak ${pick.era}` : "year unknown")}`);
     if (c.shown_info.initials) info.push(`🔤 ${esc(arInitials(pick.t))}`);
+    if (c.shown_info.album) info.push(`💿 ${esc(pick.al || "album unknown")}`);
+    if (c.shown_info.chorus) info.push(`🎶 “${esc(c.shown_info.chorus)}”`);
+    if (c.shown_info.fifty) info.push(`⚖️ ${c.shown_info.fifty.map(t => `<b>${esc(t)}</b>`).join(" or ")}`);
     const more = lines.length ? to - from < lines.length : true;
     return `${head}<div class="ar-guess">
       <div class="ar-guess-meta"><span class="ar-pill rar-${r.id}">${r.name}</span>${pick.boss ? `<span class="ar-pill">👑 Boss</span>` : ""}
@@ -914,9 +1075,10 @@ function arPlayHTML() {
         <button type="button" class="ghost" data-ar="hint" ${more ? "" : "disabled"}>➕ Next line</button>
         <button type="button" class="ghost" data-ar="lost">🏳️ Give up</button></div>
       <p class="muted ar-penalty">Hints ${c.hints} · wrong guesses ${c.wrong} · the song is lost at ${AR_MAX_PENALTY}</p>
-      ${items.length ? `<div class="ar-hand"><p class="sub-h">${arName(turn.guesser)}’s power-ups</p>${items.map((id, n) =>
-        `<button type="button" class="ar-pu small" data-ar="use" data-n="${n}" title="${esc(arPU(id).text)}"
-          ${id === "double" && arPenalty(c) > 0 ? "disabled" : ""}>${arPU(id).emoji} ${esc(arPU(id).name)}</button>`).join("")}</div>` : ""}
+      ${items.length ? `<div class="ar-hand"><p class="sub-h">${arName(turn.guesser)}’s power-ups <small class="muted">· click to use</small></p>
+        <div class="ar-icons">${items.map((id, n) => `<button type="button" class="ar-icon guess" data-ar="use" data-n="${n}"
+          title="${esc(arPU(id).name)}: ${esc(arPU(id).text)}" ${arPlayItemOk(c, id) ? "" : "disabled"}><span class="ar-icon-e">${arPU(id).emoji}</span>
+          <small>${esc(arPU(id).name)}</small></button>`).join("")}</div></div>` : ""}
     </div>`;
   }
   // reveal
@@ -973,14 +1135,45 @@ function arResolve(outcome) {
   arPlayPreview(pick.k);
 }
 
+// guessing power-ups that only make sense at some moments
+function arPlayItemOk(c, id) {
+  if (id === "double") return arPenalty(c) === 0 && !c.double;
+  if (id === "rewind") return arPenalty(c) > 0;
+  if (id === "shield") return !c.shield;
+  if (["artist", "year", "initials", "album", "chorus", "fifty"].includes(id)) return !c.shown_info[id];
+  return true;
+}
+// the line repeated most often: the chorus, more or less
+function arChorusLine(lines) {
+  const n = new Map();
+  lines.forEach(l => n.set(arNorm(l), (n.get(arNorm(l)) || 0) + 1));
+  let best = null, most = 1;
+  lines.forEach(l => { if (n.get(arNorm(l)) > most) { most = n.get(arNorm(l)); best = l; } });
+  return best;
+}
+// the wrong title for Fifty-fifty: another song in the decks, by the same band when there is one
+function arDecoy(pick) {
+  const all = ar.drafts.flatMap(d => d.picks).filter(p => !p.skipped && p.k !== pick.k && arNorm(p.t) !== arNorm(pick.t));
+  const same = all.filter(p => p.a === pick.a);
+  const d = arRand(same.length ? same : all);
+  return shuffle([pick.t, d ? d.t : "Something else"]);
+}
+
 function arUseItem(n) {
   const pl = ar.play, turn = pl.queue[pl.turn], c = pl.cur, pick = arPickOf(turn);
   const items = pl.items[turn.guesser] || [];
   const id = items[n];
-  if (!id) return;
-  if (id === "double" && arPenalty(c) > 0) return;
+  if (!id || !arPlayItemOk(c, id)) return;
   items.splice(n, 1);
   c.used.push(id);
+  if (id === "album") c.shown_info.album = true;
+  if (id === "fifty") c.shown_info.fifty = arDecoy(pick);
+  if (id === "rewind") { if (c.wrong) c.wrong--; else c.hints--; }
+  if (id === "chorus") {
+    const line = arChorusLine(arLyrics[pick.k]?.lines || []);
+    if (line) c.shown_info.chorus = line;
+    else { items.splice(n, 0, id); c.used.pop(); toast("This song has no repeated line: keep the Chorus for another one."); }
+  }
   if (id === "artist") c.shown_info.artist = true;
   if (id === "year") c.shown_info.year = true;
   if (id === "initials") c.shown_info.initials = true;
@@ -1371,7 +1564,7 @@ function arRulesHTML() {
 
   <h4>1. Setting up</h4>
   <ul><li><b>Duel</b>: both of you draft a deck for the other one, then you take turns presenting. <b>One deck</b>: only one of
-    you drafts, the other only guesses (and starts with two random power-ups).</li>
+    you drafts, the other only guesses (the drafter collects the guessing power-ups for them).</li>
     <li><b>Songs per floor</b>: 3, 5 or 10. Ten makes the classic 40 songs: 10 Easy, 10 Medium, 10 Hard, 10 Impossible.</li>
     <li><b>Refreshes</b>: how many times you can swap a whole pack for a new one (5 by default).</li>
     <li><b>English lyrics only</b> (on by default): songs in other languages give the band away, so they’re left out.</li>
@@ -1379,13 +1572,16 @@ function arRulesHTML() {
   <p>The run is saved in this browser after every step, so you can close the page and continue later.</p>
 
   <h4>2. The draft</h4>
-  <p>Pass the device to the drafter; the guesser mustn’t see it. You go through <b>four floors</b>, 🌱 Easy → 🔥 Medium →
-    💀 Hard → 👹 Impossible, filling each with the chosen number of songs. Every pick shows a <b>pack</b>: a theme and
-    3 to 5 songs. Click one to put it in your deck. The others go away (a song can be offered at most twice per draft).
+  <p>Pass the device to the drafter; the guesser mustn’t see it. Your deck has <b>four floors</b>, 🌱 Easy, 🔥 Medium,
+    💀 Hard and 👹 Impossible, each with the chosen number of songs, but <b>the floors come in a random order you don’t
+    see</b>: a pack is always for one floor, and you find out which one when its song is in your deck (or with the 🔭 Spyglass).
+    Every pick shows a <b>pack</b>: a theme and 3 to 5 songs. Click one to put it in your deck. The others go away (a song can be offered at most twice per draft).
     Then <b>choose its lyric</b>: the song’s lyrics open with a suggested line that follows the floor’s rule (see the game below).
     Tap another line, 🎲 for a new suggestion, and − / + for how many lines the guesser gets (Easy and Medium start with two,
     Hard and Impossible with one), then ✍️ <b>Keep</b>. Changed your mind? ↩ puts the song back into the pack.</p>
-  <ul><li><b>Songs you both know.</b> It’s a game for two: every song is one you’ve <i>both</i> played at least 3 times,
+  <ul><li><b>🌅 A blessing to start</b>, like Neow’s in Slay the Spire: choose one of three, one of them with a price.
+      ${Object.values(AR_BLESSINGS).map(b => `${b.emoji} <b>${esc(b.name)}</b>${b.cost ? ` (${esc(b.cost.toLowerCase())})` : ""}: ${esc(b.text)}`).join(" ")}</li>
+    <li><b>Songs you both know.</b> It’s a game for two: every song is one you’ve <i>both</i> played at least 3 times,
     so the guesser can name it and the drafter can present it and sing along. On the easier floors the drafter’s favourites
     come up more (on Easy, a song they played 30+ times is 2.5 times as likely as one they played 3–9 times).</li>
     <li><b>Seen from the guesser’s side.</b> Which floor a song is on, how special it is, its story, the year it belongs to and
@@ -1417,10 +1613,14 @@ function arRulesHTML() {
     <li><b>The lyric sheet</b>: when a deck is done, it becomes a list, floor by floor: the lines you chose, up to three more lines
       as hints, and the answer with its rarity and points. Write it on paper, 📋 copy it or 🖨️ print it. At the end of the draft
       every deck’s sheet is there again (each drafter opens their own), and ▶ <b>Play on this screen</b> is the optional alternative.</li>
-    <li><b>Treasure</b> 🎁: after each floor you choose one of three power-ups. Sometimes a chest also turns up in the middle of a floor.</li>
-    <li><b>Events</b> (at most one per floor, by chance): 🎴 <b>a face-down card</b>, a Rare-or-better song you take blind or
-      leave; 🧳 <b>a trader</b> who swaps a refresh for a power-up.</li>
-    <li><b>👑 The boss pack</b>: the last pick of the Impossible floor is an Epic or Legendary pack when there is one. That song is
+    <li><b>Treasure</b> 🎁: after every fifth of the draft (four times) you take one power-up for the draft and one for guessing,
+      each from three. With a blessing, that’s about five of each by the end. Sometimes a 🧰 chest turns up too.</li>
+    <li><b>Your hand</b>: power-ups wait as little icons under the floors. Click a draft one to use it; most act on the pack in
+      front of you, before you pick from it. The guessing ones are for the game: in a duel the drafter keeps them for their
+      own turns as guesser, with one deck they’re for the guesser. They’re on the lyric sheet to tick off on paper.</li>
+    <li><b>Events</b> (at most one between two treasures, by chance): 🎴 <b>a face-down card</b>, a Rare-or-better song you take
+      blind or leave; 🧳 <b>a trader</b> who swaps a refresh for a power-up.</li>
+    <li><b>👑 The boss pack</b>: the very last pick is an Epic or Legendary pack when there is one. That song is
       worth double in the game.</li>
     <li>At most 3 songs per artist in one deck.</li></ul>
 
@@ -1449,8 +1649,10 @@ function arRulesHTML() {
     favour older years, and the current year never gets a year pack. Rare-or-better songs are a bit more likely than common ones.</p>
 
   <h4>4. Power-ups</h4>
-  <p>For the draft:</p><ul>${pu(AR_DRAFT_ITEMS)}</ul>
-  <p>For the game (in a duel, the drafter keeps them for their own turns as guesser):</p><ul>${pu(AR_PLAY_ITEMS)}</ul>
+  <p>For the draft (click them in your hand):</p><ul>${pu(AR_DRAFT_ITEMS)}</ul>
+  <p>For guessing (in a duel, the drafter keeps them for their own turns as guesser; with one deck they’re the guesser’s).
+    On paper the presenter does what the power-up says: names the artist, reads the chorus, names a wrong title next to
+    the right one…</p><ul>${pu(AR_PLAY_ITEMS)}</ul>
 
   <h4>5. The game</h4>
   <p><b>On paper</b>: the drafter reads (or sings) the lines from their sheet, each hint is the next line on it, and you count
@@ -1618,7 +1820,7 @@ function arSwapOut(dr, key, free) {
   const n = dr.picks.findIndex(p => p.k === key);
   if (n < 0) return;
   const [p] = dr.picks.splice(n, 1);
-  if (!free) dr.keep.splice(dr.keep.indexOf("mulligan"), 1);
+  if (!free) dr.hand.splice(dr.hand.indexOf("mulligan"), 1);
   dr.pending.push(p.tier);
   if (dr.done) dr.done = false;
   if (!dr.pack && !dr.event) arNext(dr);
@@ -1664,7 +1866,7 @@ document.addEventListener("click", async e => {
   // ---- draft
   if (ar?.phase === "draft" && dr) {
     const pool = arPoolNow(dr);
-    const lp = dr.lyric, lines = lp ? arLyrics[lp.k]?.lines || [] : [];
+    const lp = dr.lyric, lines = lp ? arLyrics[lp.k]?.lines || [] : [], ev = dr.event;
     if (lp && a === "lyric-line") { lp.start = +b.dataset.i; }
     else if (lp && a === "lyric-random") { lp.start = arRandomLine(lines, lp.tier, dr.picks.find(x => x.k === lp.k)?.t || ""); }
     else if (lp && a === "lyric-count-") { lp.count = Math.max(1, lp.count - 1); }
@@ -1682,19 +1884,38 @@ document.addEventListener("click", async e => {
       arTakeSong(dr, b.dataset.k);                 // then the lyric step; the draft goes on after it
     } else if (a === "refresh" && dr.pack && dr.refreshes > 0 && !dr.pack.taken) {
       dr.refreshes--;
-      const tier = dr.pack.tier;
+      const tier = dr.pack.tier, scouted = dr.pack.scouted;
       dr.pack = null;
-      dr.pack = arBuildPack(dr, pool, tier);
+      dr.pack = arBuildPack(dr, pool, tier, {scouted});
     } else if (a === "ban-menu") {
       b.parentElement.querySelector(".ar-ban-menu").hidden = !b.parentElement.querySelector(".ar-ban-menu").hidden;
       return;
     } else if (a === "ban-song" || a === "ban-artist") {
       return arBan(dr, b.dataset.k, a === "ban-artist");
-    } else if (a === "loot" && dr.event?.type === "treasure") {
-      arUsePowerup(dr, b.dataset.id);
-      toast(`${arPU(b.dataset.id).emoji} ${arPU(b.dataset.id).name}${arPU(b.dataset.id).when === "play" ? ": saved for when you guess" : ""}`);
+    } else if (a === "pu") {
+      arUseDraftPU(dr, pool, +b.dataset.n);
+    } else if (a === "bless" && ev?.type === "neow") {
+      const bl = AR_BLESSINGS[b.dataset.id];
+      arBless(dr, b.dataset.id);
+      toast(`${bl.emoji} ${bl.name}`);
+      arPlay("treasure");
+      if (!dr.event) arNext(dr);
+    } else if (a === "loot" && ev?.type === "treasure") {
+      ev.sel[b.dataset.row] = b.dataset.id;
+    } else if (a === "loot-take" && ev?.type === "treasure" && ev.sel.d && ev.sel.g) {
+      arGain(dr, ev.sel.d);
+      arGain(dr, ev.sel.g);
+      toast(`${arPU(ev.sel.d).emoji} ${arPU(ev.sel.d).name} and ${arPU(ev.sel.g).emoji} ${arPU(ev.sel.g).name} are in your hand.`);
       dr.event = null;
+      if (dr.hoard) { dr.event = arTreasureEvent({title: `👑 Dragon’s hoard (${4 - dr.hoard} of 3)`}); dr.hoard--; }
       arNext(dr);
+    } else if (a === "compass" && ev?.type === "compass") {
+      const t = +b.dataset.t, i = dr.order.indexOf(t);
+      dr.order.splice(i, 1);
+      dr.order.unshift(t);
+      dr.event = null;
+      dr.pack = arBuildPack(dr, pool, t, {scouted: true});
+      if (!dr.pack && !dr.event) arNext(dr);
     } else if (a === "mystery-take" && dr.event?.type === "mystery") {
       const ev = dr.event;
       dr.event = null;
@@ -1707,7 +1928,7 @@ document.addEventListener("click", async e => {
       arNext(dr);
     } else if (a === "trade-yes" && dr.event?.type === "trader") {
       dr.refreshes--;
-      arUsePowerup(dr, dr.event.item);
+      arGain(dr, dr.event.item);
       toast(`🧳 ${arPU(dr.event.item).emoji} ${arPU(dr.event.item).name} is yours.`);
       dr.event = null;
       arNext(dr);
@@ -1719,14 +1940,17 @@ document.addEventListener("click", async e => {
       dr.event = null;
       dr.pack = arPackFrom(dr, pool, ev.tier, b.dataset.id);
       if (dr.pack && ev.boss) dr.pack.boss = true;
+      if (!dr.pack) arNext(dr);
     } else if (a === "time" && dr.event?.type === "time") {
       const ev = dr.event;
       dr.event = null;
       dr.pack = arPackFrom(dr, pool, ev.tier, "release", +b.dataset.y);
       if (dr.pack && ev.boss) dr.pack.boss = true;
-    } else if (a === "mulligan" && dr.keep.includes("mulligan")) {
+      if (!dr.pack) arNext(dr);
+    } else if (a === "mulligan" && dr.hand.includes("mulligan")) {
       if (!confirm("Use your Mulligan on this song? You get a new pick for its floor.")) return;
       arSwapOut(dr, b.dataset.k, false);
+      arMulliganMode = false;
     } else if (a === "swap-free") {
       arSwapOut(dr, b.dataset.k, true);
     } else return;
