@@ -444,21 +444,26 @@ function openGame() {
   $("game-modes").innerHTML = modes.map(([m, l]) =>
     `<button type="button" role="tab" data-mode="${m}" aria-selected="${m === game.mode}">${l}</button>`).join("");
   $("game").showModal();
+  $("game-modes").querySelector("[aria-selected=true]")?.scrollIntoView({block: "nearest", inline: "center"});   // phones: the strip scrolls
   newGame();
 }
 
 async function newGame() {
   stopTune?.();
+  game.hgen = (game.hgen || 0) + 1;                                     // a running reveal stops
+  if (game.mode !== "tune" && typeof tune !== "undefined") tune.gen = (tune.gen || 0) + 1;   // and Name that tune's loader
   if (typeof EXTRA_GAMES !== "undefined" && EXTRA_GAMES[game.mode]) return EXTRA_GAMES[game.mode]();   // more.js
   const box = $("game-stage");
   box.innerHTML = `<p class="muted">Shuffling songs…</p>`;
-  game.score = 0; game.round = 0; game.busy = false;
+  Object.assign(game, {score: 0, round: 0, busy: false, phase: "ask", streak: 0, shields: 0, newBest: false, adv: false, rev: null});
   try {
     if (game.mode === "hilo") {
       game.pool = shuffle(await poolFor(gamePid(), 200));                  // more.js; BOTH mixes everyone's songs
       if (game.pool.length < 2) throw new Error("not enough songs in this time frame; pick a wider one");
+      game.best0 = bestScore(hiloKey());
       game.a = pick(); game.b = pick();
       renderHilo();
+      fxPlay("deal");
     } else {
       const d = await getJSON("/api/tracks?" + listParams({page: 1, size: 200, q: "", sort: "joint", view: "top",
         level: "track", min: 0, common: 1, by: "plays"}));
@@ -470,6 +475,7 @@ async function newGame() {
       }));
       if (game.pool.length < 3) throw new Error("not enough songs in common in this time frame; pick a wider one");
       game.total = Math.min(10, game.pool.length);
+      game.best0 = bestScore(whoKey());
       game.a = pick();
       renderWho();
     }
@@ -483,79 +489,240 @@ function songCard(s, reveal, label) {
     ${label ? `<p class="g-count">${label}</p>` : ""}${reveal ?? ""}</div>`;
 }
 
-function renderHilo(result) {
-  const key = "hilo:" + gname(game.pid);
-  const ppl = state.people.length > 1
-    ? `<label class="g-who">Whose plays? <select id="g-person">${personOptions(game.pid)}</select></label>` : "";
-  const bPlays = result ? `<p class="g-count reveal">${game.b.plays.toLocaleString()} plays</p>` : "";
-  $("game-stage").innerHTML = `${ppl}
-    <p class="g-q">${state.people.length > 1 ? esc(gname(game.pid)) + (game.pid === BOTH ? " together played" : " played") : "You played"} <b>${esc(game.a.title)}</b>
-      ${game.a.plays.toLocaleString()} times ${esc(frameLabel())}. And this one?</p>
-    <div class="g-pair">${songCard(game.a, "", `${game.a.plays.toLocaleString()} plays`)}
-      <span class="g-vs">vs</span>${songCard(game.b, bPlays)}</div>
-    <div class="g-actions">${result
-      ? `<p class="g-result ${result.ok ? "ok" : "bad"}">${result.ok ? "Right!" : "Not quite."}</p>
-         ${result.ok ? `<button type="button" data-g="next">Next song</button>` : `<button type="button" data-g="again">Play again</button>`}`
-      : `<button type="button" data-g="higher">▲ More plays</button><button type="button" data-g="lower">▼ Fewer plays</button>`}</div>
-    <p class="g-score">Score ${game.score} · Best ${Math.max(bestScore(key), game.score)}</p>`;
+// ------------------------------------------------------- higher or lower --
+// The flashiest one. Song A shows its plays; is B higher or lower? B's number is a face-down tile: a drumroll,
+// the tile flips and the count rolls up past (or short of) A's mark on the meter. The closer the two counts,
+// the rarer the reveal, Hearthstone style: Rare (within 15%), Epic "close call" (5%), Legendary "photo finish"
+// (1%, or a tie), which charges up and explodes in gold. Streaks climb through the tiers in fx.js, and shields
+// (one every 5 in a row, and one for every photo finish you call right; two at most) save a run from one miss.
+const HILO_SHIELD_EVERY = 5, HILO_SHIELD_MAX = 2;
+const hiloKey = () => "hilo:" + gname(game.pid);
+const hiloAlive = gen => () => gen === game.hgen && $("game").open && game.mode === "hilo";
+
+function hiloCard(s, side, plays) {
+  const r = game.rev, rar = side === "b" && r ? r.rar : 0;
+  const shown = plays !== null;
+  return `<div class="hl-card ${side}${shown && side === "b" ? " flipped" : ""}${rar ? ` rar-${FX_RAR[rar]}` : ""}${r && side === "b" ? (r.ok ? " ok" : " bad") : ""}">
+    <div class="hl-art">${cover(s.cover_key)}</div>
+    <p class="g-title">${esc(s.title)}</p><p class="muted">${esc(s.sub)}</p>
+    <div class="hl-plays"><div class="hl-tile">
+      <span class="hl-back" aria-hidden="true">?</span>
+      <span class="hl-front"><b class="hl-num">${shown ? plays.toLocaleString() : "0"}</b><small>plays</small></span>
+    </div></div>
+    ${rar && r ? `<span class="hl-rar">${FX_CLOSE_NAME[rar]}</span>` : ""}
+  </div>`;
 }
 
-function answerHilo(higher) {
+function hiloMeter(show) {
+  const a = game.a.plays, b = game.b.plays, max = Math.max(a, b) * 1.12 || 1;
+  return `<div class="hl-meter${show ? " on" : ""}" aria-hidden="true">
+    <i class="hl-fill" style="--to:${(b / max * 100).toFixed(1)}%;${show ? `width:${(b / max * 100).toFixed(1)}%` : ""}"></i>
+    <b class="hl-mark" style="left:${(a / max * 100).toFixed(1)}%"><span>${a.toLocaleString()}</span></b></div>`;
+}
+
+function renderHilo() {
+  const key = hiloKey(), r = game.rev, ph = game.phase;
+  const ppl = state.people.length > 1
+    ? `<label class="g-who">Whose plays? <select id="g-person">${personOptions(game.pid)}</select></label>` : "";
+  const shields = Array.from({length: HILO_SHIELD_MAX}, (_, i) =>
+    `<span class="hl-shield${i < game.shields ? " on" : ""}" title="${i < game.shields ? "A shield: saves the run from one wrong answer" : "An empty shield slot"}">🛡️</span>`).join("");
+  const showB = ph !== "ask" && ph !== "reveal";
+  const verdict = !r ? "" : r.ok ? `<p class="g-result ok">${r.a === r.b ? "A tie: that counts!" : "Right!"} ${r.b > r.a ? "▲" : r.b < r.a ? "▼" : "="}
+      ${Math.abs(r.b - r.a).toLocaleString()} ${r.b >= r.a ? "more" : "fewer"}</p>`
+    : r.saved ? `<p class="g-result bad">Wrong, but the 🛡️ shield saved you.</p>`
+    : `<p class="g-result bad">💥 Wrong: ${Math.abs(r.b - r.a).toLocaleString()} ${r.b > r.a ? "more" : "fewer"}. The streak is over.</p>`;
+  const actions = ph === "ask" ? `<button type="button" class="hl-btn up" data-g="higher">▲ More plays</button>
+      <button type="button" class="hl-btn down" data-g="lower">▼ Fewer plays</button>`
+    : ph === "reveal" ? `<button type="button" class="hl-btn ${game.guess ? "up" : "down"} chosen" disabled>${game.guess ? "▲ More plays" : "▼ Fewer plays"}</button>`
+    : ph === "lost" ? `${verdict}<button type="button" data-g="hl-over">🏁 Your streak</button>`
+    : `${verdict}<button type="button" data-g="next">Next song ▶</button>`;
+  $("game-stage").innerHTML = `${ppl}
+    <div class="hl-hud">${fxStreakBadge(game.score, "right")}<span class="hl-shields">${shields}</span>
+      <span class="hl-best">Best ${Math.max(game.best0 || 0, game.score)}${game.newBest ? " ✨" : ""}</span></div>
+    <p class="g-q">${state.people.length > 1 ? esc(gname(game.pid)) + (game.pid === BOTH ? " together played" : " played") : "You played"} <b>${esc(game.a.title)}</b>
+      ${game.a.plays.toLocaleString()} times ${esc(frameLabel())}. And this one?</p>
+    <div class="g-pair hl-pair${game.adv && !fxCalm() ? " adv" : ""} tier-${fxTier(game.score)}">${hiloCard(game.a, "a", game.a.plays)}
+      <span class="g-vs hl-vs">VS</span>${hiloCard(game.b, "b", showB ? game.b.plays : null)}</div>
+    ${hiloMeter(showB)}
+    <div class="g-actions hl-actions">${actions}</div>
+    <p class="g-score hl-keys">${ph === "ask" ? "Keys: ↑ more · ↓ fewer" : ph === "reveal" ? "&nbsp;" : "Enter: go on"}</p>`;
+  game.adv = false;
+}
+
+async function answerHilo(higher) {
+  if (game.phase !== "ask") return;
   const a = game.a.plays, b = game.b.plays;
   const ok = a === b || (higher ? b > a : b < a);
-  if (ok) game.score++;
-  else saveBest("hilo:" + gname(game.pid), game.score);
-  renderHilo({ok});
-  if (ok && !game.pool.length) {
-    saveBest("hilo:" + gname(game.pid), game.score);
-    $("game-stage").querySelector(".g-actions").innerHTML = `<p class="g-result ok">You got through every song!</p><button type="button" data-g="again">Play again</button>`;
+  const rar = a === b ? 3 : fxCloseness(a, b);
+  const alive = hiloAlive(++game.hgen);
+  game.phase = "reveal"; game.guess = higher;
+  renderHilo();
+  const box = $("game-stage"), card = box.querySelector(".hl-card.b"), meter = box.querySelector(".hl-meter");
+  if (!fxCalm()) {
+    fxPlay("drumroll", rar >= 2 ? 0.9 : 0.55);
+    card.classList.add(rar === 3 ? "charging" : rar === 2 ? "charging-sm" : "suspense");
+    if (rar === 3) fxPlay("charge", 0.9);
+    await fxWait(rar >= 2 ? 920 : 560);
+    if (!alive()) return;
+    card.classList.remove("charging", "charging-sm", "suspense");
+  }
+  card.classList.add("flipped");
+  fxPlay("flip");
+  meter.classList.add("on", "grow");
+  await fxCountUp(card.querySelector(".hl-num"), b, {dur: 1000, gen: alive});
+  if (!alive()) return;
+  // the verdict
+  let saved = false, gained = 0;
+  if (ok) {
+    game.score++;
+    gained = (game.score % HILO_SHIELD_EVERY === 0 ? 1 : 0) + (rar === 3 ? 1 : 0);
+    gained = Math.min(gained, HILO_SHIELD_MAX - game.shields);
+    game.shields += gained;
+  } else if (game.shields > 0) { game.shields--; saved = true; }
+  const newBest = ok && game.score > (game.best0 || 0) && !game.newBest;
+  if (newBest) game.newBest = true;
+  if (ok) saveBest(hiloKey(), game.score);
+  game.rev = {ok, saved, rar, a, b};
+  game.phase = ok || saved ? "result" : "lost";
+  if (ok && !game.pool.length) game.phase = "cleared";
+  renderHilo();
+  const card2 = box.querySelector(".hl-card.b"), badge = box.querySelector(".fx-streak");
+  if (ok) {
+    fxBurst(card2, {color: rar ? rar : "good", level: Math.max(1, rar)});
+    fxPlay(rar ? FX_RAR[rar] : "right");
+    if (rar === 3) { fxPlay("legendary"); fxShake(box, true); }
+    if (rar >= 2) fxCallout(card2, FX_CLOSE_NAME[rar], rar, {at: "top"});
+    fxFloat(badge, "+1");
+    fxPulse(badge, "fx-pop");
+    setTimeout(() => alive() && fxStreak(box.querySelector(".hl-pair"), game.score), 380);
+    if (newBest && game.best0) setTimeout(() => { if (!alive()) return; fxPlay("best"); fxCallout(badge, "New best!", "legendary", {at: "top", size: 0.8}); }, 950);
+    if (gained) setTimeout(() => {
+      if (!alive()) return;
+      const sh = box.querySelectorAll(".hl-shield.on");
+      fxPlay("shield");
+      sh.forEach(x => fxPulse(x, "fx-pop"));
+      fxBurst(box.querySelector(".hl-shields"), {color: "rare", level: 1, small: true});
+      fxCallout(box.querySelector(".hl-shields"), `🛡️ Shield${gained > 1 ? "s" : ""}!`, "rare", {size: 0.7});
+    }, 1300);
+    if (game.phase === "cleared") setTimeout(() => alive() && hiloOver(true), 1600);
+  } else if (saved) {
+    fxPlay("shatter");
+    fxShake(card2);
+    fxCallout(box.querySelector(".hl-shields"), "🛡️ Saved!", "rare", {size: 0.8});
+  } else {
+    fxPlay("wrong");
+    setTimeout(() => fxPlay("over"), 250);
+    fxShake(box, true);
+    fxCallout(card2, "Streak over", "bad", {at: "top", size: 0.8});
   }
 }
 
-function renderWho(revealed) {
-  const s = game.a, plays = s.per.map(x => x ? x.plays : 0), max = Math.max(...plays);
-  const buttons = game.people.map((pid, j) => {
-    const cls = revealed ? (plays[j] === max ? "win" : revealed.pick === pid ? "lose" : "") : "";
-    return `<button type="button" data-who="${pid}" class="${cls}" style="--c:${color(pid)}" ${revealed ? "disabled" : ""}>
-      ${esc(pname(pid))}${revealed ? `<small>${plays[j].toLocaleString()} plays</small>` : ""}</button>`;
-  }).join("");
-  const last = game.round + 1 >= game.total;
-  $("game-stage").innerHTML = `<p class="g-q">Round ${game.round + 1} of ${game.total}: who played this more ${esc(frameLabel())}?</p>
-    <div class="g-pair">${songCard(s)}</div>
-    <div class="g-who-buttons">${buttons}</div>
-    <div class="g-actions">${revealed
-      ? `<p class="g-result ${revealed.ok ? "ok" : "bad"}">${revealed.ok ? "Right!" : "Nope."}</p>
-         <button type="button" data-g="${last ? "done" : "next"}">${last ? "See your score" : "Next song"}</button>` : ""}</div>
-    <p class="g-score">Score ${game.score} / ${game.round + (revealed ? 1 : 0)}</p>`;
+function hiloNext() {
+  if (game.phase !== "result") return;
+  if (!game.pool.length) return hiloOver(true);
+  game.a = game.b; game.b = pick();
+  game.phase = "ask"; game.rev = null; game.adv = true;
+  renderHilo();
+  fxPlay("deal");
 }
 
-function answerWho(pid) {
+function hiloOver(cleared = false) {
+  ++game.hgen;
+  const key = hiloKey(), n = game.score, t = fxTierInfo(n);
+  saveBest(key, n);
+  const msg = cleared ? "You got through every song!" : n === 0 ? "Out on the first card. It happens." : n < 3 ? "A warm-up."
+    : t ? `${t.emoji} ${t.name}.` : "Nice run.";
+  const box = $("game-stage");
+  box.innerHTML = `<div class="g-final hl-over"><p class="sub-h">${cleared ? "🏁 Cleared" : "💥 Streak over"} · ${esc(gname(game.pid))}</p>
+    <p class="huge"><span data-fx-score>${n}</span></p><p class="big-line">${esc(msg)}</p>
+    <p class="g-score">Best ${bestScore(key)}${game.newBest && game.best0 ? " · a new best!" : ""}</p>
+    <div class="g-actions"><button type="button" data-g="again">Play again</button></div></div>`;
+  fxFinal(box, {score: n, newBest: (game.newBest && game.best0 > 0) || fxTier(n) >= 3, perfect: cleared, gen: hiloAlive(game.hgen)});
+}
+
+// ---------------------------------------------------- who played it more --
+// Pick a person; both counts roll up as bars, the winner's lights up in their colour.
+const whoKey = () => "who:" + game.people.map(pname).join("+");
+function renderWho() {
+  const s = game.a, plays = s.per.map(x => x ? x.plays : 0), max = Math.max(...plays), r = game.rev;
+  const show = game.phase !== "ask";
+  const buttons = game.people.map((pid, j) => {
+    const cls = r ? (plays[j] === max ? "win" : r.pick === pid ? "lose" : "") : game.pick === pid && show ? "chosen" : "";
+    return `<button type="button" data-who="${pid}" class="who-btn ${cls}" style="--c:${color(pid)}" ${show ? "disabled" : ""}>
+      <span>${esc(pname(pid))}${r && plays[j] === max ? " 👑" : ""}</span>
+      <span class="who-bar"><i style="--w:${(plays[j] / max * 100).toFixed(1)}%${r ? `;width:${(plays[j] / max * 100).toFixed(1)}%` : ""}"></i></span>
+      <small><b class="who-n" data-n="${plays[j]}">${r ? plays[j].toLocaleString() : show ? "0" : "?"}</b> plays</small></button>`;
+  }).join("");
+  const last = game.round + 1 >= game.total;
+  $("game-stage").innerHTML = `<div class="hl-hud">${fxStreakBadge(game.streak || 0)}<span class="hl-best">Round ${game.round + 1} of ${game.total}</span></div>
+    <p class="g-q">Who played this more ${esc(frameLabel())}?</p>
+    <div class="g-pair who-pair">${songCard(s)}</div>
+    <div class="g-who-buttons">${buttons}</div>
+    <div class="g-actions">${r
+      ? `<p class="g-result ${r.ok ? "ok" : "bad"}">${r.ok ? "Right!" : "Nope."}${r.rar >= 2 ? ` ${FX_CLOSE_NAME[r.rar]}` : ""}</p>
+         <button type="button" data-g="${last ? "done" : "next"}">${last ? "See your score" : "Next song ▶"}</button>` : ""}</div>
+    <p class="g-score">Score ${game.score} / ${game.round + (r ? 1 : 0)}</p>`;
+}
+
+async function answerWho(pid) {
+  if (game.phase !== "ask") return;
   const s = game.a, j = game.people.indexOf(pid), plays = s.per.map(x => x ? x.plays : 0);
-  const ok = plays[j] === Math.max(...plays);
-  if (ok) game.score++;
-  renderWho({pick: pid, ok});
+  const sorted = plays.slice().sort((x, y) => y - x), rar = fxCloseness(sorted[0], sorted[1] || 0);
+  const ok = plays[j] === sorted[0];
+  const gen = ++game.hgen, alive = () => gen === game.hgen && $("game").open && game.mode === "who";
+  game.phase = "reveal"; game.pick = pid;
+  renderWho();
+  const box = $("game-stage");
+  if (!fxCalm()) {
+    fxPlay("drumroll", 0.5);
+    fxPulse(box.querySelector(".who-pair .g-song"), rar === 3 ? "charging" : "suspense", 600);
+    await fxWait(520);
+    if (!alive()) return;
+  }
+  box.querySelectorAll(".who-btn").forEach(b => b.classList.add("grow"));
+  await Promise.all([...box.querySelectorAll(".who-n")].map((el, i) => fxCountUp(el, +el.dataset.n, {dur: 900, sound: i === 0, gen: alive})));
+  if (!alive()) return;
+  if (ok) { game.score++; game.streak = (game.streak || 0) + 1; } else game.streak = 0;
+  game.rev = {pick: pid, ok, rar};
+  game.phase = "result";
+  renderWho();
+  const win = box.querySelector(".who-btn.win"), mine = box.querySelector(`.who-btn[data-who="${pid}"]`);
+  fxBurst(win, {color: getComputedStyle(win).getPropertyValue("--c").trim() || "good", level: Math.max(1, rar)});
+  if (ok) {
+    fxPlay(rar ? FX_RAR[rar] : "right");
+    fxFloat(box.querySelector(".g-score"), "+1");
+    if (rar >= 2) fxCallout(win, FX_CLOSE_NAME[rar], rar, {size: 0.8});
+    setTimeout(() => alive() && fxStreak(box.querySelector(".who-pair"), game.streak), 350);
+  } else {
+    fxPlay("wrong");
+    fxShake(mine);
+  }
 }
 
 function finishWho() {
-  const key = "who:" + game.people.map(pname).join("+");
+  ++game.hgen;
+  const key = whoKey(), before = bestScore(key);
   saveBest(key, game.score);
   const msg = game.score === game.total ? "Perfect. You know each other’s music by heart."
     : game.score >= game.total * 0.7 ? "Impressive. You pay attention."
     : game.score >= game.total * 0.4 ? "Not bad. Some surprises in there."
     : "You might want to listen to each other more.";
-  $("game-stage").innerHTML = `<div class="g-final"><p class="huge">${game.score} / ${game.total}</p><p class="big-line">${esc(msg)}</p>
+  const box = $("game-stage");
+  box.innerHTML = `<div class="g-final"><p class="huge"><span data-fx-score>${game.score}</span> / ${game.total}</p><p class="big-line">${esc(msg)}</p>
     <p class="g-score">Best ${bestScore(key)} / ${game.total}</p><div class="g-actions"><button type="button" data-g="again">Play again</button></div></div>`;
+  fxFinal(box, {score: game.score, newBest: before > 0 && game.score > before, perfect: game.score === game.total});
 }
 
 $("game-open").addEventListener("click", openGame);
 $("game-close").addEventListener("click", () => $("game").close());
-$("game").addEventListener("close", () => stopTune?.());
+$("game").addEventListener("close", () => { stopTune?.(); game.hgen = (game.hgen || 0) + 1; });
 var stopTune = null;                                   // set by more.js: stops a playing preview
 $("game-modes").addEventListener("click", e => {
   const b = e.target.closest("[data-mode]");
   if (!b || b.dataset.mode === game.mode) return;
   game.mode = b.dataset.mode;
   $("game-modes").querySelectorAll("[data-mode]").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+  if (typeof closeRules === "function") closeRules($("game"));
   newGame();
 });
 $("game-stage").addEventListener("change", e => {
@@ -567,9 +734,21 @@ $("game-stage").addEventListener("click", e => {
   if (g === "higher" || g === "lower") return answerHilo(g === "higher");
   if (g === "again") return newGame();
   if (g === "done") return finishWho();
+  if (g === "hl-over") return hiloOver();
   if (g === "next") {
-    if (game.mode === "hilo") { game.a = game.b; game.b = pick(); renderHilo(); }
-    else { game.round++; game.a = pick(); renderWho(); }
+    if (game.mode === "hilo") hiloNext();
+    else if (game.phase === "result") { game.round++; game.a = pick(); game.phase = "ask"; game.rev = null; renderWho(); fxPlay("deal"); }
+  }
+});
+// Higher or lower from the keyboard: ↑ more, ↓ fewer, Enter to go on
+// (on the document: a redraw drops the focus out of the dialog)
+document.addEventListener("keydown", e => {
+  if (!$("game").open || game.mode !== "hilo" || e.target.closest?.("select, input, textarea") || e.altKey || e.ctrlKey || e.metaKey) return;
+  if (document.querySelector("#game .rules-panel")) return;
+  if (game.phase === "ask" && (e.key === "ArrowUp" || e.key === "ArrowDown")) { e.preventDefault(); answerHilo(e.key === "ArrowUp"); }
+  else if (e.key === "Enter" && !e.target.closest("button")) {
+    if (game.phase === "result") { e.preventDefault(); hiloNext(); }
+    else if (game.phase === "lost") { e.preventDefault(); hiloOver(); }
   }
 });
 

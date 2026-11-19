@@ -145,7 +145,16 @@ function spinRoulette() {
     n++;
     const s = n >= total ? pickIt : pool[Math.floor(Math.random() * pool.length)];
     $("rl-reel").innerHTML = cover(s.cover_key, "rl-cover") + `<span class="rl-flash">${esc(s.title)}</span>`;
-    if (n >= total) { rl.spinning = false; renderRoulette(); $("rl-reel").classList.add("landed"); return; }
+    fxPlay("spin", n);
+    if (n >= total) {
+      rl.spinning = false; renderRoulette(); $("rl-reel").classList.add("landed");
+      const yrs = pickIt.years || 0, lvl = yrs >= 5 ? 3 : yrs >= 3 ? 2 : 1;      // the longer forgotten, the rarer
+      fxPlay(FX_RAR[lvl]);
+      if (lvl === 3) fxPlay("legendary");
+      fxBurst($("rl-reel"), {color: lvl, level: lvl});
+      if (lvl >= 2) fxCallout($("rl-reel"), lvl === 3 ? "Buried treasure!" : "Long lost!", lvl, {at: "top", size: 0.8});
+      return;
+    }
     delay *= 1.08;
     setTimeout(step, delay);
   };
@@ -180,7 +189,7 @@ async function startOrder() {
   try {
     wf.pool = (await poolFor(game.pid, 300)).filter(s => s.first);
     if (wf.pool.length < 12) throw new Error("not enough songs in this time frame; pick a wider one");
-    wf.round = 0; wf.score = 0;
+    wf.round = 0; wf.score = 0; wf.perfects = 0;
     nextOrder();
   } catch (e) {
     gameBox().innerHTML = `${pickPerson("Whose songs?")}<p class="muted">Can't start the game: ${esc(e.message)}.</p>`;
@@ -199,7 +208,9 @@ function nextOrder() {
     if (four.length === 4) { wf.cur = four; break; }
   }
   wf.picks = [];
+  wf.revealing = false;
   renderOrder();
+  fxPlay("deal");
 }
 
 function renderOrder() {
@@ -208,26 +219,57 @@ function renderOrder() {
   const got = done ? wf.picks.filter((k, i) => right[i].key === k).length : 0;
   gameBox().innerHTML = `${pickPerson("Whose songs?")}
     <p class="g-q">Round ${wf.round + 1} of ${wf.rounds}: tap them in the order ${game.pid === BOTH ? "either of you" : "you"} first played them, oldest first.</p>
-    <div class="wf-cards">${wf.cur.map(s => {
+    <div class="wf-cards${!done && !wf.picks.length && !fxCalm() ? " fx-stagger" : ""}">${wf.cur.map((s, i) => {
       const at = wf.picks.indexOf(s.key), pos = right.indexOf(s);
-      const cls = done ? (right[at]?.key === s.key ? "ok" : "bad") : at >= 0 ? "picked" : "";
-      return `<button type="button" class="wf-card ${cls}" data-wf="${esc(s.key)}" ${done || at >= 0 ? "disabled" : ""}>
-        ${at >= 0 ? `<span class="wf-n">${at + 1}</span>` : ""}${cover(s.cover_key)}
+      const cls = done ? (right[at]?.key === s.key ? "ok" : "bad") + (wf.revealing ? " pending" : "") : at >= 0 ? "picked" : "";
+      return `<button type="button" class="wf-card ${cls}" data-wf="${esc(s.key)}" data-at="${at}" style="--i:${i}" ${done || at >= 0 ? "disabled" : ""}>
+        ${at >= 0 ? `<span class="wf-n${!done && at === wf.picks.length - 1 ? " fresh" : ""}">${at + 1}</span>` : ""}${cover(s.cover_key)}
         <b>${esc(s.title)}</b><small>${esc(s.sub)}</small>
         ${done ? `<small class="wf-date">#${pos + 1} · ${esc(nice(s.first))}</small>` : ""}</button>`;
     }).join("")}</div>
-    <div class="g-actions">${done ? `<p class="g-result ${got === 4 ? "ok" : got >= 2 ? "" : "bad"}">${got === 4 ? "Perfect order! 🎯" : `${got} of 4 in the right place.`}</p>
+    <div class="g-actions${wf.revealing ? " pending" : ""}">${done ? `<p class="g-result ${got === 4 ? "ok" : got >= 2 ? "" : "bad"}">${got === 4 ? "Perfect order! 🎯" : `${got} of 4 in the right place.`}</p>
       <button type="button" data-wf-next>${wf.round + 1 >= wf.rounds ? "See your score" : "Next round"}</button>`
       : wf.picks.length ? `<button type="button" class="ghost" data-wf-undo>Undo</button>` : ""}</div>
-    <p class="g-score">Score ${wf.score} / ${wf.round * 4 + (done ? 4 : 0)}</p>`;
+    <p class="g-score">Score ${wf.score - (wf.revealing ? got : 0)} / ${wf.round * 4 + (done && !wf.revealing ? 4 : 0)}</p>`;
+}
+
+// the verdicts land one by one, in the order you tapped them
+async function revealOrder(got) {
+  const box = gameBox(), gen = wf.gen = (wf.gen || 0) + 1;
+  const alive = () => gen === wf.gen && game.mode === "order" && $("game").open;
+  const cards = [...box.querySelectorAll(".wf-card.pending")].sort((a, b) => +a.dataset.at - +b.dataset.at);
+  if (!fxCalm()) {
+    fxPlay("drumroll", 0.4);
+    await fxWait(420);
+    for (const c of cards) {
+      if (!alive()) return;
+      c.classList.remove("pending");
+      const ok = c.classList.contains("ok");
+      fxPlay(ok ? "coin" : "wrong");
+      if (ok) fxBurst(c, {color: "good", level: 1, small: true}); else fxShake(c);
+      await fxWait(330);
+    }
+  }
+  if (!alive()) return;
+  wf.revealing = false;
+  renderOrder();
+  if (got === 4) {
+    fxPlay("epic");
+    fxBurst(box.querySelector(".wf-cards"), {color: "legendary", level: 2});
+    fxCallout(box.querySelector(".wf-cards"), "Perfect order!", "legendary");
+    wf.perfects++;
+    fxStreak(box.querySelector(".wf-cards"), wf.perfects);
+  } else if (got >= 2) fxPlay("right");
+  else fxPlay("over");
 }
 
 function finishOrder() {
-  const key = "order:" + gname(game.pid), max = wf.rounds * 4;
+  const key = "order:" + gname(game.pid), max = wf.rounds * 4, before = bestScore(key);
   saveBest(key, wf.score);
-  gameBox().innerHTML = `<div class="g-final"><p class="huge">${wf.score} / ${max}</p>
+  gameBox().innerHTML = `<div class="g-final"><p class="huge"><span data-fx-score>${wf.score}</span> / ${max}</p>
     <p class="big-line">${wf.score >= max * 0.85 ? "A walking music diary. 📔" : wf.score >= max * 0.5 ? "You know your history." : "It all blurs together, doesn’t it?"}</p>
     <p class="g-score">Best ${bestScore(key)} / ${max}</p><div class="g-actions"><button type="button" data-g="again">Play again</button></div></div>`;
+  fxFinal(gameBox(), {score: wf.score, newBest: before > 0 && wf.score > before, perfect: wf.score === max});
 }
 
 EXTRA_GAMES.order = startOrder;
@@ -235,14 +277,20 @@ $("game-stage").addEventListener("click", e => {
   if (game.mode !== "order") return;
   const card = e.target.closest("[data-wf]");
   if (card) {
+    if (card.disabled) return;
     wf.picks.push(card.dataset.wf);
+    fxPlay("stamp", wf.picks.length);
     if (wf.picks.length === wf.cur.length) {
       const right = [...wf.cur].sort((a, b) => a.first.localeCompare(b.first));
-      wf.score += wf.picks.filter((k, i) => right[i].key === k).length;
+      const got = wf.picks.filter((k, i) => right[i].key === k).length;
+      wf.score += got;
+      wf.revealing = !fxCalm();
+      renderOrder();
+      return revealOrder(got);
     }
     return renderOrder();
   }
-  if (e.target.closest("[data-wf-undo]")) { wf.picks.pop(); return renderOrder(); }
+  if (e.target.closest("[data-wf-undo]")) { wf.picks.pop(); fxPlay("whoosh"); return renderOrder(); }
   if (e.target.closest("[data-wf-next]")) {
     wf.round++;
     return wf.round >= wf.rounds ? finishOrder() : nextOrder();

@@ -23,6 +23,7 @@ const AR_RARITY = [
 const AR_PACK_SIZE = [3, 3, 4, 4];                 // songs in a pack, by the pack's rarity (Wildcard: 5)
 const AR_FAMILY_WEIGHT = [1, 0.85, 0.6, 0.35];     // how often a pack of each rarity comes up
 const AR_MAX_PENALTY = 6;                          // hints + wrong guesses before a song is lost
+const AR_HUM_AFTER = 3;                            // hint lines before the presenter may hum it (−1 pt); the sheet's hints if fewer
 const AR_EVENT_CHANCE = {chest: 0.03, mystery: 0.03, trader: 0.02};   // per pick, at most one between two treasures
 const AR_TREASURES = 4;                            // treasure after each fifth of the draft (the last fifth has none)
 const AR_ARTIST_CAP = 3;                           // songs per artist in one deck
@@ -802,6 +803,7 @@ function arSheetHTML(di) {
   const items = arGuessItems(dr.guesser);
   let n = 0;
   return `<div class="ar-sheet"><h3>📝 ${arName(dr.drafter)}’s lyrics for ${arName(dr.guesser)}</h3>
+    <p class="muted ar-sheet-rule">Each hint is the next line. All lines out and still stuck? ${arName(dr.drafter)} hums it: 🎵 −1 pt if ${arName(dr.guesser)} gets it then.</p>
     ${AR_TIERS.map((t, ti) => {
       const picks = dr.picks.filter(p => p.tier === ti && !p.skipped);
       if (!picks.length) return "";
@@ -827,6 +829,7 @@ function arSheetHTML(di) {
 
 function arSheetText(di) {
   const dr = ar.drafts[di], out = [`${pname(dr.drafter)}’s lyrics for ${pname(dr.guesser)} (Lyrics Arena, ${new Date().toLocaleDateString()})`];
+  out.push(`Each hint is the next line. All lines out and still stuck? ${pname(dr.drafter)} hums it: −1 pt if ${pname(dr.guesser)} gets it then.`);
   let n = 0;
   AR_TIERS.forEach((t, ti) => {
     const picks = dr.picks.filter(p => p.tier === ti && !p.skipped);
@@ -925,7 +928,7 @@ function arPickOf(turn) { return ar.drafts[turn.di].picks.find(p => p.k === turn
 function arFreshTurn(turn) {
   const pick = arPickOf(turn);
   return {stage: "cover", start: null, count: pick?.line?.count || arTier(turn.tier).start, shown: 0, hints: 0, wrong: 0,
-          shield: false, double: false, shown_info: {}, outcome: null, sing: null, used: []};
+          shield: false, double: false, hummed: false, shown_info: {}, outcome: null, sing: null, used: []};
 }
 function arChosenStart(pick, lines) {
   const want = pick.line?.lines?.[0];
@@ -992,6 +995,11 @@ function arShownRange(c, n) {
   const up = Math.max(0, start - Math.max(0, start + c.shown - n));
   return [up, down];
 }
+function arHumReady(c, pick, lines) {
+  if (c.hummed) return false;
+  const [from, to] = arShownRange(c, lines.length);
+  return c.hints >= (pick.line?.hints?.length || AR_HUM_AFTER) || (lines.length > 0 && to - from >= lines.length);
+}
 function arStarsNow(c) { const p = arPenalty(c); return p === 0 ? 3 : p <= 2 ? 2 : p < AR_MAX_PENALTY ? 1 : 0; }
 
 function arScore(turn, c, pick) {
@@ -1005,6 +1013,7 @@ function arScore(turn, c, pick) {
     if (c.outcome === "won") { out.guesser += bonus; out.bonusTo = "guesser"; }
     else { out.presenter += bonus; out.bonusTo = "presenter"; }
   }
+  if (c.hummed && c.outcome === "won") { out.guesser = Math.max(0, out.guesser - 1); out.hum = true; }
   return out;
 }
 
@@ -1051,7 +1060,8 @@ function arPlayHTML() {
     const [from, to] = arShownRange(c, lines.length);
     const shown = lines.slice(from, to);
     const stars = arStarsNow(c), base = arTier(turn.tier).points;
-    const stake = base * stars * (pick.boss ? 2 : 1) * (c.double ? 2 : 1);
+    const stake = Math.max(0, base * stars * (pick.boss ? 2 : 1) * (c.double ? 2 : 1) - (c.hummed ? 1 : 0));
+    const humOk = arHumReady(c, pick, lines), humNeed = pick.line?.hints?.length || AR_HUM_AFTER;
     const items = pl.items[turn.guesser] || [];
     const info = [];
     if (c.shown_info.artist) info.push(`🎤 ${esc(pick.a)}`);
@@ -1064,6 +1074,7 @@ function arPlayHTML() {
     return `${head}<div class="ar-guess">
       <div class="ar-guess-meta"><span class="ar-pill rar-${r.id}">${r.name}</span>${pick.boss ? `<span class="ar-pill">👑 Boss</span>` : ""}
         ${c.double ? `<span class="ar-pill">✖️ Double down</span>` : ""}${c.shield ? `<span class="ar-pill">🛡️ Shield up</span>` : ""}
+        ${c.hummed ? `<span class="ar-pill">🎵 Hummed −1</span>` : ""}
         <span class="ar-stars" title="Each hint or wrong guess costs: 0 → ★★★, 1–2 → ★★, 3–5 → ★, 6 → lost">${arStars(stars)}</span>
         <span class="muted">${stake} pt${stake === 1 ? "" : "s"} at stake${r.bonus ? ` + ${r.bonus} rarity bonus` : ""}</span></div>
       ${lines.length ? `<blockquote class="ar-lyrics">${shown.map(l => `<p>${esc(l)}</p>`).join("")}</blockquote>`
@@ -1073,6 +1084,8 @@ function arPlayHTML() {
         <button type="button" data-ar="won">✅ Got it</button>
         <button type="button" class="ghost" data-ar="wrong">❌ Wrong guess</button>
         <button type="button" class="ghost" data-ar="hint" ${more ? "" : "disabled"}>➕ Next line</button>
+        <button type="button" class="ghost" data-ar="hum-hint" ${humOk ? "" : "disabled"}
+          title="${c.hummed ? "Already hummed" : `${esc(pname(turn.presenter))} hums the song: one point less if it’s guessed then. Once the lines are out (${humNeed} hint${humNeed > 1 ? "s" : ""})`}">🎵 ${c.hummed ? "Hummed" : "Hum it · −1"}</button>
         <button type="button" class="ghost" data-ar="lost">🏳️ Give up</button></div>
       <p class="muted ar-penalty">Hints ${c.hints} · wrong guesses ${c.wrong} · the song is lost at ${AR_MAX_PENALTY}</p>
       ${items.length ? `<div class="ar-hand"><p class="sub-h">${arName(turn.guesser)}’s power-ups <small class="muted">· click to use</small></p>
@@ -1093,7 +1106,7 @@ function arPlayHTML() {
       <p><span class="ar-pill rar-${r.id}">${r.name}</span>${pick.cat ? ` <span class="muted">${esc(pick.cat)}</span>` : ""}</p>
       ${pick.story ? `<p class="ar-card-story">${esc(pick.story)}</p>` : ""}</div></div>
     <p class="ar-result ${won ? "ok" : "bad"}">${won ? `<span class="ar-stars-fx">${stars}</span> ${arName(turn.guesser)} got it: +${sc.guesser}` : `💨 Missed.`}
-      ${!won && sc.presenter ? `${arName(turn.presenter)} steals the rarity bonus: +${sc.presenter}` : ""}${c.sing ? " · 🎤 +1 for singing it" : ""}</p>
+      ${!won && sc.presenter ? `${arName(turn.presenter)} steals the rarity bonus: +${sc.presenter}` : ""}${sc.hum ? " · 🎵 −1 for the hum" : ""}${c.sing ? " · 🎤 +1 for singing it" : ""}</p>
     ${c.loot ? `<p class="ar-loot-msg">🎁 Legendary loot: ${arName(turn.guesser)} gets ${arPU(c.loot).emoji} ${esc(arPU(c.loot).name)}</p>` : ""}
     ${singAsk ? `<div class="ar-sing"><p>🎤 Now sing it! Did ${arName(turn.guesser)} get the next line right?</p>
       <p class="ar-lyrics small">${esc(arSingLine(c, L.lines))}</p>
@@ -1130,7 +1143,7 @@ function arResolve(outcome) {
   }
   pl.results.push({turn: pl.turn, k: pick.k, t: pick.t, a: pick.a, presenter: turn.presenter, guesser: turn.guesser,
                    tier: turn.tier, rar: pick.rar, outcome, stars: c.score.stars, hints: c.hints, wrong: c.wrong,
-                   gain: c.score.guesser, steal: c.score.presenter, boss: pick.boss});
+                   gain: c.score.guesser, steal: c.score.presenter, boss: pick.boss, hum: !!c.hummed});
   arSave();
   arPlayPreview(pick.k);
 }
@@ -1546,7 +1559,7 @@ function arResultsHTML() {
     <div class="ar-final">${rows.map(r => `<div style="--c:${color(r.pid)}"><b>${arName(r.pid)}</b><span class="huge">${r.s}</span>
       <small>${statLine(r.pid)}</small></div>`).join("")}</div>
     ${best.length ? `<p class="sub-h">Biggest moments</p><ol class="ar-moments">${best.map(r =>
-      `<li><b>${esc(r.t)}</b> <span class="muted">· ${esc(r.a)}</span> — ${r.outcome === "won" ? `${arName(r.guesser)} ${arStars(r.stars)} +${r.gain}`
+      `<li><b>${esc(r.t)}</b> <span class="muted">· ${esc(r.a)}</span> — ${r.outcome === "won" ? `${arName(r.guesser)} ${arStars(r.stars)}${r.hum ? " 🎵" : ""} +${r.gain}`
         : `missed${r.steal ? `, ${arName(r.presenter)} stole +${r.steal}` : ""}`}${r.boss ? " 👑" : ""}</li>`).join("")}</ol>` : ""}
     <div class="g-actions"><button type="button" data-ar="new-run">🏟️ New run</button></div></div>`;
 }
@@ -1665,6 +1678,9 @@ function arRulesHTML() {
     <li>👀 Show: the guesser sees only the lines. They guess out loud; the presenter judges (exact song: right title, right band).</li>
     <li>➕ <b>Next line</b> reveals one more line. ❌ <b>Wrong guess</b> counts like a hint. Every hint or wrong guess costs:
       0 → ★★★, 1–2 → ★★, 3–5 → ★, at 6 the song is lost. 🏳️ gives up.</li>
+    <li>🎵 <b>Hum it · −1</b>: once the hint lines are out (the sheet’s, ${AR_HUM_AFTER} on screen) and the guesser is still stuck, the presenter
+      hums the song. It isn’t a hint (the stars stay), but getting it after a hum is worth one point less (never below 0).
+      Once per song. It’s not the 🎵 Hum it power-up, which is free.</li>
     <li>Reveal: the song plays, and with the sing-it bonus on, sing the next line for +1.</li></ol>
 
   <h4>6. Points</h4>
@@ -1674,7 +1690,7 @@ function arRulesHTML() {
       steals it: a rare pick is a gamble.</li>
     <li>👑 <b>Boss song</b>: everything ×2 (not the rarity bonus).</li>
     <li>✖️ <b>Double down</b>: the floor points ×2 if guessed with at most one hint or wrong guess, otherwise no floor points (the rarity bonus works as usual).</li>
-    <li>🎤 <b>Sing it</b>: +1. 🎁 <b>Legendary loot</b>: getting a Legendary song ★★★ earns a random power-up.</li>
+    <li>🎵 <b>Hummed</b>: −1 if the song is guessed after the hum. 🎤 <b>Sing it</b>: +1. 🎁 <b>Legendary loot</b>: getting a Legendary song ★★★ earns a random power-up.</li>
     <li>In a duel, most points after the last song wins. The result goes into the 🏆 hall of fame.</li></ul>
 
   <h4>7. House rules worth agreeing on</h4>
@@ -1975,6 +1991,9 @@ document.addEventListener("click", async e => {
       if (c.shield) { c.shield = false; toast("🛡️ The shield took that one."); }
       else c.wrong++;
       if (arPenalty(c) >= AR_MAX_PENALTY) arResolve("lost");
+    } else if (a === "hum-hint") {
+      if (!arHumReady(c, arPickOf(turn), arLyrics[turn.k]?.lines || [])) return;
+      c.hummed = true; toast(`🎵 ${pname(turn.presenter)}, hum it!`);
     } else if (a === "won") { arResolve("won"); }
     else if (a === "lost") { arResolve("lost"); }
     else if (a === "use") { return arUseItem(+b.dataset.n); }

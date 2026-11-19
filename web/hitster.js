@@ -33,6 +33,7 @@ function hsStop() {
   if (button) { button.textContent = hsPlayLabel(); button.disabled = !hsCanPlay(); }
   const bar = $("hitster-body")?.querySelector(".hs-progress i");
   if (bar) { bar.style.transition = "none"; bar.style.width = "0"; }
+  $("hitster-body")?.querySelector(".hs-mystery")?.classList.remove("playing");
 }
 
 function hsWeightedTake(items, weightFor) {
@@ -88,9 +89,20 @@ function hsWeightedPick() {
   return hs.pool.shift();
 }
 
-function hsCard(s) {
-  return `<article class="hs-card${s.anchor ? " anchor" : ""}">${cover(s.cover_key)}
-    <b>${esc(s.title)}</b><span>${esc(s.sub)}</span><strong>${s.year}</strong>${s.anchor ? `<small>Starting card</small>` : ""}</article>`;
+function hsCard(s, mark = "") {
+  return `<article class="hs-card${s.anchor ? " anchor" : ""}${mark ? " " + mark : ""}">${cover(s.cover_key)}
+    <b>${esc(s.title)}</b><span>${esc(s.sub)}</span><strong>${s.year}</strong>${s.anchor ? `<small>Starting card</small>`
+      : mark === "ghost" ? `<small>Belongs here</small>` : mark === "new" ? `<small>New!</small>` : ""}</article>`;
+}
+
+// after a guess: the timeline with the new card lit up, or a ghost of the missed card where it belonged
+function hsResultTimeline(cards) {
+  const cur = hs.current;
+  if (hs.correct) return `<div class="hs-scroll"><div class="hs-timeline">${cards.map(c =>
+    hsCard(c, c.key === cur.key && !c.anchor ? "new" : "")).join("")}</div></div>`;
+  const at = cards.findIndex(c => c.year > cur.year), i = at < 0 ? cards.length : at;
+  const list = [...cards.slice(0, i).map(c => hsCard(c)), hsCard(cur, "ghost"), ...cards.slice(i).map(c => hsCard(c))];
+  return `<div class="hs-scroll"><div class="hs-timeline">${list.join("")}</div></div>`;
 }
 
 function hsTimeline(cards, place) {
@@ -123,11 +135,13 @@ function hsRender() {
   const shared = listNames(hs.people);
   const reveal = hs.revealed ? `<div class="hs-reveal">${cover(current.cover_key)}<div><p class="g-title">${esc(current.title)}</p>
       <p class="muted">${esc(current.sub)}</p><p class="hs-year">${current.year}</p></div></div>
-    <p class="g-result ${hs.correct ? "ok" : "bad"}">${hs.correct ? "Correct — you keep the card!" :
+    <div class="hs-after${hs.rolling ? " pending" : ""}"><p class="g-result ${hs.correct ? "ok" : "bad"}">${hs.correct ? "Correct — you keep the card!" :
       `Not quite — it belongs ${esc(hsRange(timeline, current.year))}.`}</p>
     <div class="g-actions"><button type="button" data-hs="${hs.winner == null ? "next" : "finish"}">
-      ${hs.winner == null ? (hs.mode === "duo" ? "Next player" : "Next song") : "See the result"}</button></div>` : "";
+      ${hs.winner == null ? (hs.mode === "duo" ? "Next player" : "Next song") : "See the result"}</button></div>
+    ${hsResultTimeline(timeline)}</div>` : "";
   $("hitster-body").innerHTML = `${hsScores()}
+    ${hs.streaks?.[hs.turn] >= 2 && !hs.revealed ? `<p class="hs-streak">${fxStreakBadge(hs.streaks[hs.turn], "placed")}</p>` : ""}
     <p class="hs-note">Drawn from songs shared by <b>${esc(shared)}</b>.
       Every song has a different release year, and only one song per album can appear. The starting card anchors the timeline and does not count toward the
       ${hs.target} you need to keep. <b>${esc(hs.difficulty[0].toUpperCase() + hs.difficulty.slice(1))}:</b>
@@ -186,6 +200,7 @@ async function hsPlay() {
     source.start(now, from, len);
     hs.playsUsed++;
     hs.src = source;
+    button.closest(".hs-mystery")?.classList.add("playing");
     button.textContent = "■ Stop snippet";
     bar.style.transition = "none"; bar.style.width = "0";
     void bar.offsetWidth;
@@ -213,7 +228,43 @@ function hsPlace(at) {
     hs.scores[hs.turn]++;
     if (hs.scores[hs.turn] >= hs.target) hs.winner = hs.turn;
   }
+  hs.streaks[hs.turn] = hs.correct ? (hs.streaks[hs.turn] || 0) + 1 : 0;
+  hs.rolling = !fxCalm();
   hsRender();
+  hsRevealFx(before === year || after === year);
+}
+
+// a drumroll, the year spins like a slot reel and lands; then the card joins the timeline (or doesn't)
+async function hsRevealFx(sameYear) {
+  const box = $("hitster-body"), gen = hs.gen, turn = hs.turn, year = hs.current.year;
+  const alive = () => gen === hs.gen && hs.revealed && $("hitster-dlg").open;
+  if (hs.rolling) {
+    fxPlay("drumroll", 0.5);
+    const lo = Math.min(...hs.timelines[turn].map(c => c.year), year) - 4, hi = Math.max(...hs.timelines[turn].map(c => c.year), year) + 4;
+    await fxRoll(box.querySelector(".hs-year"), year, {spins: 16, dur: 900, pick: () => lo + Math.floor(Math.random() * (hi - lo + 1)), gen: alive});
+    if (!alive()) return;
+    hs.rolling = false;
+    box.querySelector(".hs-after")?.classList.remove("pending");
+  }
+  const card = box.querySelector(".hs-card.new, .hs-card.ghost");
+  card?.scrollIntoView?.({block: "nearest", inline: "center", behavior: fxCalm() ? "auto" : "smooth"});
+  if (hs.correct) {
+    fxPlay("right");
+    fxBurst(card, {color: sameYear ? "epic" : "good", level: sameYear ? 2 : 1});
+    if (sameYear) fxCallout(card, "Same year!", "epic", {at: "top", size: 0.8});
+    fxFloat(box.querySelectorAll(".hs-scores span")[turn], "+1 card");
+    setTimeout(() => alive() && fxStreak(box.querySelector(".hs-reveal"), hs.streaks[turn]), 350);
+    if (hs.winner != null) setTimeout(() => {
+      if (!alive()) return;
+      fxPlay("fanfare");
+      fxConfetti(box);
+      fxCallout(box.querySelector(".hs-reveal"), hs.mode === "duo" ? `${hs.players[hs.winner]} wins!` : "Timeline complete!", "legendary");
+    }, 700);
+  } else {
+    fxPlay("wrong");
+    fxShake(box.querySelector(".hs-reveal"));
+    fxPulse(card, "fx-glow", 1400);
+  }
 }
 
 function hsNext() {
@@ -225,8 +276,9 @@ function hsNext() {
       <div class="g-actions"><button type="button" data-hs="restart">Start again</button></div>`;
     return;
   }
-  Object.assign(hs, {revealed: false, correct: false, picked: null, playsUsed: 0, buf: null, load: null});
+  Object.assign(hs, {revealed: false, correct: false, picked: null, playsUsed: 0, buf: null, load: null, rolling: false});
   hsRender();
+  fxPlay("deal");
   hsLoadPreview().catch(() => {});                       // same preloading path as Name That Tune
 }
 
@@ -237,6 +289,11 @@ function hsFinish() {
     ${hs.players.map((name, i) => `<section class="hs-final"><h3>${esc(name)} · ${hs.scores[i]} kept</h3>
       ${hsTimeline(hs.timelines[i], false)}</section>`).join("")}
     <div class="g-actions"><button type="button" data-hs="restart">Play again</button></div></div>`;
+  const big = $("hitster-body").querySelector(".huge");
+  fxPulse(big, "fx-pop", 700);
+  fxPlay("fanfare");
+  fxBurst(big, {color: "legendary", level: 3});
+  fxConfetti(big);
 }
 
 async function startHitster() {
@@ -259,6 +316,7 @@ async function startHitster() {
     hs.pool = hsBuildPool(data.songs);
     hs.players = hs.mode === "duo" ? hs.people.slice(0, 2).map(pname) : ["You"];
     hs.scores = hs.players.map(() => 0);
+    hs.streaks = hs.players.map(() => 0);
     hs.turn = 0; hs.winner = null;
     const seed = hsWeightedPick();
     hs.timelines = hs.players.map(() => [{...seed, anchor: true}]);

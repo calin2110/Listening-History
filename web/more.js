@@ -312,7 +312,8 @@ async function startTune() {
     tune.names = [...new Map(all.map(s => [normSong(s.title) + "|" + s.sub, `${s.title} — ${s.sub}`])).values()];
     tune.pool = all.slice(0, tunePoolSize());                // answers: your top 100-500, picked in the game
     if (tune.pool.length < 4) throw new Error("not enough songs in this time frame; pick a wider one");
-    tune.round = 0; tune.score = 0; tune.results = []; tune.cur = null;
+    tune.round = 0; tune.score = 0; tune.results = []; tune.cur = null; tune.streak = 0;
+    tune.best0 = bestScore("tune6:" + gname(game.pid));
     tune.ctx ??= new (window.AudioContext || window.webkitAudioContext)();
     startLoader();
     nextTune();
@@ -476,10 +477,11 @@ function renderTune() {
   const won = tune.guesses.some(g => g.ok);
   const nextLen = TUNE_STAGES[s + 1];
   gameBox().innerHTML = `${tuneHeader()}
-    <p class="g-q">Round ${tune.round + 1} of ${tune.rounds}: name this song.</p>
+    <div class="hl-hud">${fxStreakBadge(tune.streak || 0, "named")}<span class="hl-best">Round ${tune.round + 1} of ${tune.rounds}</span></div>
+    <p class="g-q">Name this song.</p>
     <div class="tune-stages">${stages}</div>
     <div class="tune-progress"><i></i></div>
-    ${tune.done ? `<div class="tune-reveal">${cover(cur.cover_key)}<div><p class="g-title">${esc(cur.title)}</p>
+    ${tune.done ? `<div class="tune-reveal${won ? ` won st-${tune.guesses.length - 1}` : " lost"}">${cover(cur.cover_key)}<div><p class="g-title">${esc(cur.title)}</p>
         <p class="muted">${esc(cur.sub)}</p></div></div>
       <p class="g-result ${won ? "ok" : "bad"}">${won ? `🎉 Got it in ${secs(TUNE_STAGES[tune.guesses.length - 1])}! +${TUNE_STAGES.length - (tune.guesses.length - 1)} points`
         : "Not this time."}</p>
@@ -493,7 +495,7 @@ function renderTune() {
         <button type="button" class="ghost" data-x="tune-skip">${nextLen ? `Skip (+${secs(+(nextLen - TUNE_STAGES[s]).toFixed(1))})` : "Give up"}</button>
       </form>`}
     ${history ? `<ol class="tune-history">${history}</ol>` : ""}
-    <p class="g-score">Score ${tune.score} · ${TUNE_STAGES.length} points for 0.1 s, down to 1 for 5 s</p>`;
+    <p class="g-score">Score <b class="tune-score">${tune.score}</b> · ${TUNE_STAGES.length} points for 0.1 s, down to 1 for 5 s</p>`;
   if (!tune.done) gameBox().querySelector("#tune-guess")?.focus();
 }
 
@@ -514,25 +516,53 @@ function tuneGuess(text, skip) {
   if (tune.done) {
     tune.results.push({key: tune.cur.key, title: tune.cur.title, stage: ok ? tune.stage : -1});
     rememberTune(tune.cur.key);
+    tune.streak = ok ? (tune.streak || 0) + 1 : 0;
   }
   renderTune();
+  tuneFx(ok, skip);
   if (tune.done) playClip(30);
   else playClip();                                           // a miss plays the longer clip straight away
+}
+
+// the earlier you get it, the bigger the bang: 0.1 s is Legendary, 0.2 s and 0.5 s Epic, 1 s Rare
+const TUNE_CALLS = [[3, "Insane!"], [2, "Incredible!"], [2, "Great ear!"], [1, "Nice!"], [1, "Got it!"], [0, "Phew!"]];
+function tuneFx(ok, skip) {
+  const box = gameBox();
+  if (ok) {
+    const [lvl, word] = TUNE_CALLS[tune.stage], art = box.querySelector(".tune-reveal img, .tune-reveal");
+    fxBurst(art, {color: lvl ? lvl : "good", level: Math.max(1, lvl)});
+    fxPlay(lvl ? FX_RAR[lvl] : "right");
+    if (lvl === 3) { fxPlay("legendary"); fxShake(box, true); }
+    fxCallout(art, word, lvl ? lvl : "good", {at: "top", size: lvl >= 2 ? 1 : 0.75});
+    fxFloat(box.querySelector(".tune-score"), `+${TUNE_STAGES.length - tune.stage}`);
+    setTimeout(() => fxStreak(box.querySelector(".tune-reveal"), tune.streak), 450);
+  } else if (tune.done) {
+    fxPlay("over");
+    fxShake(box.querySelector(".tune-reveal"));
+  } else if (skip) {
+    fxPlay("whoosh");
+  } else {
+    fxPlay("wrong");
+    fxShake(box.querySelector(".tune-form"));
+    fxPulse(box.querySelectorAll(".tune-stages span.used")[tune.stage - 1], "fx-crack", 600);
+  }
 }
 
 function finishTune() {
   stopTune();
   const key = "tune6:" + gname(game.pid), max = tune.rounds * TUNE_STAGES.length;   // new scale: own best score
+  const before = bestScore(key);
   saveBest(key, tune.score);
   const grid = tune.results.map(r => r.stage < 0 ? "⬛".repeat(TUNE_STAGES.length) :
     TUNE_STAGES.map((_, i) => i < r.stage ? "🟥" : i === r.stage ? "🟩" : "⬜").join("")).join("\n");
   const msg = tune.score >= max * 0.75 ? "Golden ears. 👂✨" : tune.score >= max * 0.45 ? "You know your music."
     : tune.score >= max * 0.2 ? "Some of these sounded familiar…" : "Did you even listen to these? 😄";
   tune.share = `Name that tune · ${gname(game.pid)}’s top ${tunePoolSize()} · ${tune.score}/${max}\n${grid}`;
-  gameBox().innerHTML = `<div class="g-final"><p class="huge">${tune.score} / ${max}</p><p class="big-line">${msg}</p>
-    <pre class="tune-grid">${esc(grid)}</pre>
+  gameBox().innerHTML = `<div class="g-final"><p class="huge"><span data-fx-score>${tune.score}</span> / ${max}</p><p class="big-line">${msg}</p>
+    <pre class="tune-grid fx-stagger">${grid.split("\n").map((l, i) => `<span style="--i:${i}">${esc(l)}</span>`).join("\n")}</pre>
     <p class="g-score">Best ${bestScore(key)} / ${max}</p>
     <div class="g-actions"><button type="button" data-x="tune-copy">Copy result</button><button type="button" data-g="again">Play again</button></div></div>`;
+  fxFinal(gameBox(), {score: tune.score, newBest: before > 0 && tune.score > before, perfect: tune.score >= max * 0.75});
 }
 
 // ------------------------------------------------------------ song bracket --
@@ -549,32 +579,58 @@ async function startBracket() {
     // classic seeding: 1 v 16, 8 v 9, 5 v 12, 4 v 13, ...
     const order = size === 16 ? [1, 16, 8, 9, 5, 12, 4, 13, 6, 11, 3, 14, 7, 10, 2, 15] : size === 8 ? [1, 8, 4, 5, 3, 6, 2, 7] : [1, 4, 2, 3];
     bracket.round = order.map(n => seeds[n - 1]);
-    bracket.next = []; bracket.i = 0;
+    bracket.next = []; bracket.i = 0; bracket.busy = false; bracket.upsets = 0;
     bracket.stage = 4 - Math.log2(size);
-    renderMatch();
+    renderMatch(true);
+    fxPlay("deal");
   } catch (e) {
     gameBox().innerHTML = `${pickPerson("Whose top songs?")}<p class="muted">Can't start the bracket: ${esc(e.message)}.</p>`;
   }
 }
 
-function renderMatch() {
+function renderMatch(newRound) {
   const a = bracket.round[bracket.i], b = bracket.round[bracket.i + 1];
   const matches = bracket.round.length / 2;
+  const dots = Array.from({length: matches}, (_, i) => `<i class="${i < bracket.i / 2 ? "done" : i === bracket.i / 2 ? "now" : ""}"></i>`).join("");
   gameBox().innerHTML = `${pickPerson("Whose top songs?")}
-    <p class="g-q"><b>${bracket.names[bracket.stage]}</b>${matches > 1 ? `, match ${bracket.i / 2 + 1} of ${matches}` : ""}: which one do you like more?</p>
-    <div class="g-pair bracket-pair">${[a, b].map(s => `<button type="button" class="g-song pick" data-x="win" data-k="${esc(s.key)}">
+    <p class="g-q"><b class="bk-round">${bracket.names[bracket.stage]}</b>${matches > 1 ? `, match ${bracket.i / 2 + 1} of ${matches}` : ""}: which one do you like more?</p>
+    ${matches > 1 ? `<div class="bk-dots" aria-hidden="true">${dots}</div>` : ""}
+    <div class="g-pair bracket-pair${fxCalm() ? "" : " bk-in"}">${[a, b].map(s => `<button type="button" class="g-song pick" data-x="win" data-k="${esc(s.key)}">
       ${cover(s.cover_key)}<p class="g-title">${esc(s.title)}</p><p class="muted">${esc(s.sub)} · seed ${s.seed}</p></button>`).join(`<span class="g-vs">vs</span>`)}</div>
     <p class="g-score">${bracket.round.length - bracket.i / 2} songs still in</p>`;
+  if (newRound) {
+    const final = bracket.names[bracket.stage] === "Final";
+    fxCallout(gameBox().querySelector(".bk-round"), bracket.names[bracket.stage], final ? "legendary" : "rare", {size: final ? 1 : 0.8});
+    fxPlay("streak", final ? 3 : 1);
+  }
 }
 
-function pickWinner(key) {
+// the winner pulses and sparks, the loser drops out; a song seeded 4+ places lower winning is an upset
+async function pickWinner(key) {
+  if (bracket.busy) return;
   const a = bracket.round[bracket.i], b = bracket.round[bracket.i + 1];
-  bracket.next.push(a.key === key ? a : b);
+  const w = a.key === key ? a : b, l = w === a ? b : a, upset = w.seed - l.seed >= 4;
+  const btns = [...gameBox().querySelectorAll(".bracket-pair .pick")];
+  const win = btns.find(x => x.dataset.k === key), lose = btns.find(x => x !== win);
+  if (!fxCalm() && win) {
+    bracket.busy = true;
+    const gen = bracket.gen = (bracket.gen || 0) + 1;
+    btns.forEach(x => { x.disabled = true; });
+    win.classList.add("bk-win"); lose?.classList.add("bk-out");
+    fxPlay("stamp");
+    fxBurst(win, {color: upset ? "epic" : "rare", level: upset ? 2 : 1});
+    if (upset) { fxPlay("epic"); fxCallout(win, "Upset!", "epic", {at: "top"}); } else fxPlay("whoosh");
+    await fxWait(upset ? 900 : 620);
+    bracket.busy = false;
+    if (gen !== bracket.gen || game.mode !== "bracket" || !$("game").open) return;
+  }
+  if (upset) bracket.upsets++;
+  bracket.next.push(w);
   bracket.i += 2;
   if (bracket.i < bracket.round.length) return renderMatch();
   if (bracket.next.length === 1) return finishBracket(bracket.next[0]);
   bracket.round = bracket.next; bracket.next = []; bracket.i = 0; bracket.stage++;
-  renderMatch();
+  renderMatch(true);
 }
 
 function finishBracket(champ) {
@@ -587,12 +643,30 @@ function finishBracket(champ) {
   const note = champ.seed > 4 ? `A #${champ.seed} seed going all the way: the people’s champion.`
     : champ.seed === 1 ? "The favorite held on." : "";
   gameBox().innerHTML = `<div class="g-final"><p class="sub-h">🏆 ${esc(gname(game.pid))}’s champion</p>
-    <div class="g-pair"><div class="g-song">${cover(champ.cover_key)}<p class="g-title">${esc(champ.title)}</p><p class="muted">${esc(champ.sub)}</p></div></div>
+    <div class="g-pair"><div class="g-song bk-champ">${cover(champ.cover_key)}<p class="g-title">${esc(champ.title)}</p><p class="muted">${esc(champ.sub)}</p></div></div>
     <p>${esc(note)}</p>
     ${others.length ? `<p class="sub-h">Other champions</p>${others.map(([n, c]) => `<p><b>${esc(n)}</b>: ${esc(c.title)} by ${esc(c.sub)}
       ${c.key === champ.key ? " · the same champion! 🤝" : ""}</p>`).join("")}`
       : state.people.length > 1 ? `<p class="muted">Now let the others fill in theirs: pick their name above and play again.</p>` : ""}
     <div class="g-actions"><button type="button" data-g="again">Play again</button></div></div>`;
+  champFx(gameBox().querySelector(".bk-champ"));
+}
+
+// the champion charges up and explodes in gold
+async function champFx(card) {
+  if (!card) return;
+  if (fxCalm()) { fxPlay("fanfare"); return; }
+  card.classList.add("charging");
+  fxPlay("charge", 1);
+  await fxWait(1000);
+  if (!card.isConnected) return;
+  card.classList.remove("charging");
+  fxPlay("legendary");
+  setTimeout(() => fxPlay("fanfare"), 300);
+  fxBurst(card, {color: "legendary", level: 3});
+  fxCallout(card, "Champion!", "legendary", {at: "top"});
+  fxConfetti(card);
+  fxShake(gameBox(), true);
 }
 
 // --------------------------------------------------------- guess the month --
@@ -606,7 +680,7 @@ async function startMonth() {
     const f = await getJSON("/api/fun?" + q);
     gm.months = [...new Set(f.people.flatMap(p => (p.eras || []).map(e => e.start.slice(0, 7))))].sort();   // BOTH: anyone's months
     if (gm.months.length < 4) throw new Error("you need at least 4 months of listening in this time frame");
-    gm.round = 0; gm.score = 0;
+    gm.round = 0; gm.score = 0; gm.streak = 0;
     await nextMonth();
   } catch (e) {
     gameBox().innerHTML = `${pickPerson("Whose months?")}<p class="muted">Can't start the game: ${esc(e.message)}.</p>`;
@@ -625,25 +699,44 @@ async function nextMonth() {
     min: 0, common: 0}));
   gm.songs = d.items;
   renderMonth();
+  fxPlay("deal");
 }
 
 function renderMonth(picked) {
   gameBox().innerHTML = `${pickPerson("Whose months?")}
-    <p class="g-q">Round ${gm.round + 1} of ${gm.rounds}: these were the top songs. Which month was it?</p>
-    <ol class="gm-songs">${gm.songs.map(s => `<li>${cover(s.cover_key)}<span><b>${esc(s.title)}</b><small>${esc(s.sub)}</small></span></li>`).join("")}</ol>
+    <div class="hl-hud">${fxStreakBadge(gm.streak || 0)}<span class="hl-best">Round ${gm.round + 1} of ${gm.rounds}</span></div>
+    <p class="g-q">These were the top songs. Which month was it?</p>
+    <ol class="gm-songs${picked || fxCalm() ? "" : " fx-stagger"}">${gm.songs.map((s, i) => `<li style="--i:${i}">${cover(s.cover_key)}<span><b>${esc(s.title)}</b><small>${esc(s.sub)}</small></span></li>`).join("")}</ol>
     <div class="tune-opts">${gm.opts.map(o => `<button type="button" data-x="month" data-m="${o}" ${picked ? "disabled" : ""}
       class="${picked ? (o === gm.cur ? "win" : o === picked ? "lose" : "") : ""}"><b>${esc(monthLabel(o))}</b></button>`).join("")}</div>
     <div class="g-actions">${picked ? `<p class="g-result ${picked === gm.cur ? "ok" : "bad"}">${picked === gm.cur ? "Right!" : "It was " + esc(monthLabel(gm.cur)) + "."}</p>
       <button type="button" data-x="${gm.round + 1 >= gm.rounds ? "month-done" : "month-next"}">${gm.round + 1 >= gm.rounds ? "See your score" : "Next month"}</button>` : ""}</div>
-    <p class="g-score">Score ${gm.score} / ${gm.round + (picked ? 1 : 0)}</p>`;
+    <p class="g-score">Score <b class="gm-score">${gm.score}</b> / ${gm.round + (picked ? 1 : 0)}</p>`;
+}
+function answerMonth(m) {
+  const ok = m === gm.cur;
+  if (ok) { gm.score++; gm.streak = (gm.streak || 0) + 1; } else gm.streak = 0;
+  renderMonth(m);
+  const box = gameBox(), right = box.querySelector(`[data-m="${gm.cur}"]`);
+  if (ok) {
+    fxPlay("right");
+    fxBurst(right, {color: "good", level: 1});
+    fxFloat(box.querySelector(".gm-score"), "+1");
+    setTimeout(() => fxStreak(box.querySelector(".tune-opts"), gm.streak), 300);
+  } else {
+    fxPlay("wrong");
+    fxShake(box.querySelector(`[data-m="${m}"]`));
+    fxPulse(right, "fx-glow", 1400);
+  }
 }
 
 function finishMonth() {
-  const key = "month:" + gname(game.pid);
+  const key = "month:" + gname(game.pid), before = bestScore(key);
   saveBest(key, gm.score);
-  gameBox().innerHTML = `<div class="g-final"><p class="huge">${gm.score} / ${gm.rounds}</p>
+  gameBox().innerHTML = `<div class="g-final"><p class="huge"><span data-fx-score>${gm.score}</span> / ${gm.rounds}</p>
     <p class="big-line">${gm.score === gm.rounds ? "You remember everything. 📅" : gm.score >= 3 ? "Good memory." : "Time flies, huh?"}</p>
     <p class="g-score">Best ${bestScore(key)} / ${gm.rounds}</p><div class="g-actions"><button type="button" data-g="again">Play again</button></div></div>`;
+  fxFinal(gameBox(), {score: gm.score, newBest: before > 0 && gm.score > before, perfect: gm.score === gm.rounds});
 }
 
 $("game-stage").addEventListener("change", e => {
@@ -672,7 +765,7 @@ $("game-stage").addEventListener("click", e => {
     return;
   }
   if (x === "win") return pickWinner(b.dataset.k);
-  if (x === "month") { if (b.dataset.m === gm.cur) gm.score++; return renderMonth(b.dataset.m); }
+  if (x === "month") return answerMonth(b.dataset.m);
   if (x === "month-next") { gm.round++; return nextMonth().catch(err => { gameBox().innerHTML = `<p class="muted">${esc(err.message)}</p>`; }); }
   if (x === "month-done") return finishMonth();
 });
